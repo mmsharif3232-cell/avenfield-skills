@@ -1,47 +1,46 @@
 #!/usr/bin/env python3
-"""Avenfield sheets — Google Sheets via your own Google account (OAuth). Stdlib only.
+"""Avenfield sheets — Google Sheets via a service-account JSON. Stdlib + openssl.
 
-Because it logs in AS YOU, it can read/write any spreadsheet you can already
-open — no sharing-to-a-service-account step. One interactive `auth` per device,
-then it runs headless using a stored refresh token.
+Uses the service-account key you already have (GOOGLE_APPLICATION_CREDENTIALS).
+No GCP OAuth client, no interactive login: the script mints a bearer token by
+signing a JWT with `openssl` (present on every Mac/Linux), so it stays
+dependency-free. The service account can touch any sheet SHARED WITH ITS EMAIL
+(share the sheet with the client_email from the JSON — the easy path).
 
-ONE-TIME SETUP (per Google project, done once):
-  1. console.cloud.google.com → APIs & Services → Enable "Google Sheets API".
-  2. Credentials → Create Credentials → OAuth client ID → type "Desktop app".
-  3. Put the client id + secret in ~/.avenfield/credentials.env:
-         GOOGLE_OAUTH_CLIENT_ID=...
-         GOOGLE_OAUTH_CLIENT_SECRET=...
-  4. Per device, once:  python sheets.py auth   (opens a browser, you approve)
+SETUP (per device)
+  • Copy the service-account JSON to the device.
+  • Point GOOGLE_APPLICATION_CREDENTIALS at it in ~/.avenfield/credentials.env.
+  • Share each target sheet with the service account's email (Editor).
 
 USAGE
-  python sheets.py auth
+  python sheets.py whoami                                  # prints the SA email to share with
   python sheets.py tabs   --sheet <URL|ID>
   python sheets.py read   --sheet <URL|ID> --range "Sheet1!A1:F"
   python sheets.py write  --sheet <URL|ID> --range "Sheet1!A1" --values '[["a","b"],["c","d"]]'
   python sheets.py append --sheet <URL|ID> --range "Sheet1!A1" --values '[["x","y"]]'
   python sheets.py add-tab    --sheet <URL|ID> --title leads
   python sheets.py delete-tab --sheet <URL|ID> --title scraped
-  python sheets.py create --title "My new sheet"     # prints the new id+url
+  python sheets.py create --title "My new sheet"          # SA owns it; share/transfer as needed
 """
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
+import time
 import urllib.parse
 import urllib.request
 import urllib.error
-import webbrowser
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
 SCOPE = "https://www.googleapis.com/auth/spreadsheets"
-TOKEN_FILE = Path.home() / ".avenfield" / "google-token.json"
 
 
 def _load_env_file(path: Path) -> dict:
@@ -57,96 +56,75 @@ def _load_env_file(path: Path) -> dict:
     return out
 
 
-def _cfg(name: str) -> str | None:
-    v = os.environ.get(name)
-    if v:
-        return v
-    for p in (Path.home() / ".avenfield" / "credentials.env",
-              Path.home() / "avenfield" / "apps" / "console" / ".env"):
-        v = _load_env_file(p).get(name)
-        if v:
-            return v
-    return None
+def _sa_path() -> str:
+    p = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not p:
+        for f in (Path.home() / ".avenfield" / "credentials.env",
+                  Path.home() / "avenfield" / "apps" / "console" / ".env"):
+            p = _load_env_file(f).get("GOOGLE_APPLICATION_CREDENTIALS")
+            if p:
+                break
+    if not p:
+        sys.exit("Missing GOOGLE_APPLICATION_CREDENTIALS (path to the SA JSON).")
+    p = os.path.expanduser(p)
+    if not Path(p).exists():
+        sys.exit(f"Service-account JSON not found at {p}.")
+    return p
 
 
-def _client() -> tuple[str, str]:
-    cid, sec = _cfg("GOOGLE_OAUTH_CLIENT_ID"), _cfg("GOOGLE_OAUTH_CLIENT_SECRET")
-    if not cid or not sec:
-        sys.exit("Missing GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET. "
-                 "See setup at the top of sheets.py.")
-    return cid, sec
+def _sa() -> dict:
+    return json.loads(Path(_sa_path()).read_text())
 
 
-def _post_form(url: str, fields: dict) -> dict:
-    data = urllib.parse.urlencode(fields).encode()
-    req = urllib.request.Request(url, data=data, method="POST")
-    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+def _b64u(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+
+
+def _sign_rs256(signing_input: str, private_key_pem: str) -> str:
+    fd, keypath = tempfile.mkstemp(suffix=".pem")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
-            return json.loads(r.read())
-    except urllib.error.HTTPError as e:
-        sys.exit(f"OAuth token error {e.code}: {e.read().decode()[:300]}")
-
-
-def cmd_auth(args):
-    cid, sec = _client()
-    # Loopback OAuth (Desktop app): catch the redirect on a local port.
-    holder = {}
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            q = urllib.parse.urlparse(self.path).query
-            holder.update(urllib.parse.parse_qs(q))
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html")
-            self.end_headers()
-            self.wfile.write(b"<h2>Avenfield: Google connected. You can close this tab.</h2>")
-
-        def log_message(self, *a):
+        os.write(fd, private_key_pem.encode())
+        os.close(fd)
+        os.chmod(keypath, 0o600)
+        proc = subprocess.run(["openssl", "dgst", "-sha256", "-sign", keypath],
+                              input=signing_input.encode(),
+                              capture_output=True)
+        if proc.returncode != 0:
+            sys.exit(f"openssl signing failed: {proc.stderr.decode()[:200]}")
+        return _b64u(proc.stdout)
+    finally:
+        try:
+            os.unlink(keypath)
+        except OSError:
             pass
 
-    srv = HTTPServer(("127.0.0.1", 0), Handler)
-    port = srv.server_address[1]
-    redirect = f"http://127.0.0.1:{port}"
-    params = urllib.parse.urlencode({
-        "client_id": cid, "redirect_uri": redirect, "response_type": "code",
-        "scope": SCOPE, "access_type": "offline", "prompt": "consent",
-    })
-    url = f"{AUTH_URL}?{params}"
-    print(f"Opening browser to authorize…\nIf it doesn't open, visit:\n{url}\n")
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
-    srv.handle_request()  # blocks until Google redirects back
-    code = (holder.get("code") or [None])[0]
-    if not code:
-        sys.exit(f"No auth code received (got: {holder}).")
-    tok = _post_form(TOKEN_URL, {
-        "code": code, "client_id": cid, "client_secret": sec,
-        "redirect_uri": redirect, "grant_type": "authorization_code",
-    })
-    refresh = tok.get("refresh_token")
-    if not refresh:
-        sys.exit("No refresh_token returned. Revoke prior access at "
-                 "myaccount.google.com/permissions and re-run `auth`.")
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(json.dumps({"refresh_token": refresh}))
-    TOKEN_FILE.chmod(0o600)
-    print(f"✓ Connected. Token saved to {TOKEN_FILE}. You're set on this device.")
+
+_token_cache: dict = {}
 
 
 def _access_token() -> str:
-    if not TOKEN_FILE.exists():
-        sys.exit("Not authorized on this device. Run: python sheets.py auth")
-    refresh = json.loads(TOKEN_FILE.read_text()).get("refresh_token")
-    cid, sec = _client()
-    tok = _post_form(TOKEN_URL, {
-        "refresh_token": refresh, "client_id": cid, "client_secret": sec,
-        "grant_type": "refresh_token",
-    })
-    if "access_token" not in tok:
-        sys.exit(f"Token refresh failed: {tok}")
+    if _token_cache.get("exp", 0) > time.time() + 60:
+        return _token_cache["tok"]
+    sa = _sa()
+    now = int(time.time())
+    header = _b64u(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+    claim = _b64u(json.dumps({
+        "iss": sa["client_email"], "scope": SCOPE,
+        "aud": TOKEN_URL, "iat": now, "exp": now + 3600,
+    }).encode())
+    assertion = f"{header}.{claim}." + _sign_rs256(f"{header}.{claim}", sa["private_key"])
+    data = urllib.parse.urlencode({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": assertion,
+    }).encode()
+    req = urllib.request.Request(TOKEN_URL, data=data, method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            tok = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        sys.exit(f"Token mint failed {e.code}: {e.read().decode()[:300]}")
+    _token_cache.update(tok=tok["access_token"], exp=now + 3600)
     return tok["access_token"]
 
 
@@ -169,45 +147,44 @@ def _sheet_id(s: str) -> str:
     return m.group(1) if m else s
 
 
+def cmd_whoami(args):
+    print(json.dumps({"service_account_email": _sa().get("client_email"),
+                      "share_sheets_with_this": _sa().get("client_email")}, indent=2))
+
+
 def cmd_tabs(args):
-    sid = _sheet_id(args.sheet)
-    data = _api("GET", f"{SHEETS}/{sid}?fields=sheets.properties")
-    tabs = [{"title": s["properties"]["title"], "sheetId": s["properties"]["sheetId"]}
-            for s in data.get("sheets", [])]
-    print(json.dumps(tabs, ensure_ascii=False, indent=2))
+    data = _api("GET", f"{SHEETS}/{_sheet_id(args.sheet)}?fields=sheets.properties")
+    print(json.dumps([{"title": s["properties"]["title"],
+                       "sheetId": s["properties"]["sheetId"]}
+                      for s in data.get("sheets", [])], ensure_ascii=False, indent=2))
 
 
 def cmd_read(args):
-    sid = _sheet_id(args.sheet)
     rng = urllib.parse.quote(args.range)
-    data = _api("GET", f"{SHEETS}/{sid}/values/{rng}")
+    data = _api("GET", f"{SHEETS}/{_sheet_id(args.sheet)}/values/{rng}")
     print(json.dumps(data.get("values", []), ensure_ascii=False, indent=2))
 
 
 def cmd_write(args):
-    sid = _sheet_id(args.sheet)
     rng = urllib.parse.quote(args.range)
-    vals = json.loads(args.values)
-    data = _api("PUT", f"{SHEETS}/{sid}/values/{rng}?valueInputOption=RAW",
-                {"values": vals})
+    data = _api("PUT", f"{SHEETS}/{_sheet_id(args.sheet)}/values/{rng}?valueInputOption=RAW",
+                {"values": json.loads(args.values)})
     print(json.dumps({"updated": data}, ensure_ascii=False, indent=2))
 
 
 def cmd_append(args):
-    sid = _sheet_id(args.sheet)
     rng = urllib.parse.quote(args.range)
-    vals = json.loads(args.values)
     data = _api("POST",
-                f"{SHEETS}/{sid}/values/{rng}:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS",
-                {"values": vals})
+                f"{SHEETS}/{_sheet_id(args.sheet)}/values/{rng}:append"
+                "?valueInputOption=RAW&insertDataOption=INSERT_ROWS",
+                {"values": json.loads(args.values)})
     print(json.dumps({"appended": data.get("updates", data)}, ensure_ascii=False, indent=2))
 
 
 def cmd_add_tab(args):
-    sid = _sheet_id(args.sheet)
-    data = _api("POST", f"{SHEETS}/{sid}:batchUpdate",
+    data = _api("POST", f"{SHEETS}/{_sheet_id(args.sheet)}:batchUpdate",
                 {"requests": [{"addSheet": {"properties": {"title": args.title}}}]})
-    print(json.dumps({"added": args.title, "result": data}, ensure_ascii=False))
+    print(json.dumps({"added": args.title}, ensure_ascii=False))
 
 
 def cmd_delete_tab(args):
@@ -229,22 +206,21 @@ def cmd_create(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Google Sheets via your Google account (OAuth).")
+    ap = argparse.ArgumentParser(description="Google Sheets via service-account JSON.")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("whoami", help="Print the SA email to share sheets with.").set_defaults(fn=cmd_whoami)
 
-    sub.add_parser("auth", help="One-time browser login on this device.").set_defaults(fn=cmd_auth)
-
-    def with_sheet(p):
+    def ws(p):
         p.add_argument("--sheet", required=True, help="Spreadsheet URL or ID.")
         return p
 
-    p = with_sheet(sub.add_parser("tabs", help="List tab names + ids.")); p.set_defaults(fn=cmd_tabs)
-    p = with_sheet(sub.add_parser("read", help="Read a range.")); p.add_argument("--range", required=True); p.set_defaults(fn=cmd_read)
-    p = with_sheet(sub.add_parser("write", help="Overwrite a range.")); p.add_argument("--range", required=True); p.add_argument("--values", required=True, help="JSON 2D array."); p.set_defaults(fn=cmd_write)
-    p = with_sheet(sub.add_parser("append", help="Append rows.")); p.add_argument("--range", required=True); p.add_argument("--values", required=True, help="JSON 2D array."); p.set_defaults(fn=cmd_append)
-    p = with_sheet(sub.add_parser("add-tab", help="Add a tab.")); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_add_tab)
-    p = with_sheet(sub.add_parser("delete-tab", help="Delete a tab by name.")); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_delete_tab)
-    p = sub.add_parser("create", help="Create a new spreadsheet."); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_create)
+    p = ws(sub.add_parser("tabs")); p.set_defaults(fn=cmd_tabs)
+    p = ws(sub.add_parser("read")); p.add_argument("--range", required=True); p.set_defaults(fn=cmd_read)
+    p = ws(sub.add_parser("write")); p.add_argument("--range", required=True); p.add_argument("--values", required=True); p.set_defaults(fn=cmd_write)
+    p = ws(sub.add_parser("append")); p.add_argument("--range", required=True); p.add_argument("--values", required=True); p.set_defaults(fn=cmd_append)
+    p = ws(sub.add_parser("add-tab")); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_add_tab)
+    p = ws(sub.add_parser("delete-tab")); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_delete_tab)
+    p = sub.add_parser("create"); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_create)
 
     args = ap.parse_args()
     args.fn(args)
