@@ -10,10 +10,10 @@ pipeline. You ask in plain English; Claude runs the skill.
 | Skill | Capability |
 |-------|-----------|
 | `avenfield-browser-render` | Render / scrape / screenshot / extract any site via Cloudflare Browser Rendering (markdown, HTML, screenshot, PDF, structured JSON, element scrape, links — single or batch) |
-| _(coming)_ `avenfield-verify` | Verify emails via OmniVerifier |
+| `avenfield-verify` | Verify email deliverability via OmniVerifier (valid / catch-all / invalid / disposable / role) |
+| `avenfield-instantly` | Drive Instantly v2 — list campaigns, add leads, push sequences, or any endpoint (generic passthrough) |
+| `avenfield-sheets` | Read/write any Google Sheet **as you** via OAuth — no service-account sharing |
 | _(coming)_ `avenfield-extract` | Extract variables from rendered content via OpenAI |
-| _(coming)_ `avenfield-instantly` | Push leads / manage campaigns + sequences via Instantly |
-| _(coming)_ `avenfield-sheets` | Read/write Google Sheets directly |
 
 Your existing copy/spintax/spamguard skills stay as-is — these complete the set.
 
