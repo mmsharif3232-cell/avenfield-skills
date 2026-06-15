@@ -19,33 +19,40 @@ Your existing copy/spintax/spamguard skills stay as-is — these complete the se
 
 ## Install on a new device (one time)
 
+You'll need two things from the admin (via 1Password / secure share):
+1. the **API keys** blob, and 2. the **Google service-account JSON** file.
+
 ```bash
-# 1. Get the repo (skip if you already have the monorepo cloned)
-git clone <REPO_URL> ~/avenfield        # or: git pull, if already cloned
+# 1. Clone the skills repo
+git clone https://github.com/mmsharif3232-cell/avenfield-skills ~/avenfield-skills
 
-# 2. Link the skills + create your local credentials file
-bash ~/avenfield/skills/install.sh
+# 2. Run the installer — it links the skills, then asks for the two secrets
+bash ~/avenfield-skills/install.sh
+#    STEP 1: paste the keys blob, press Ctrl-D
+#    STEP 2: drag the .json file into the window, press Enter
+#    → it saves both, wires up Google Sheets, prints the SA email to share sheets with
 
-# 3. Paste your keys (one time per device)
-$EDITOR ~/.avenfield/credentials.env
-
-# 4. Restart Claude Code — the skills are now available
+# 3. Restart Claude Code — all skills are live
 ```
+
+That's it — no manual file editing. The installer writes
+`~/.avenfield/credentials.env` and `~/.avenfield/google-sa.json` (perms 600)
+and points `GOOGLE_APPLICATION_CREDENTIALS` at the JSON for you.
 
 ## How credentials work
 
-- Keys live **only** in `~/.avenfield/credentials.env` on each device (perms 600).
-- That file is **never** committed — only the `.template` is in git.
-- Every skill script reads keys from, in order: the process env →
-  `~/.avenfield/credentials.env` → the console `.env` (if present).
-- For `avenfield-sheets` you also need the Google service-account JSON copied
-  to each device, at the path named in `GOOGLE_APPLICATION_CREDENTIALS`.
+- Secrets live **only** under `~/.avenfield/` on each device (perms 600).
+- **Never** committed — only the `.template` is in git.
+- Each skill reads keys in order: process env → `~/.avenfield/credentials.env`
+  → the console `.env` (if present).
+- Google Sheets: the installer drops the SA JSON in place. Share each target
+  sheet (Editor) with the SA email it prints; sheets already shared just work.
 
 ## Updating
 
 ```bash
-cd ~/avenfield && git pull
-bash skills/install.sh        # picks up any new skills; credentials untouched
+cd ~/avenfield-skills && git pull
+bash install.sh        # re-links skills (picks up new ones); credentials untouched
 ```
 
 Because `~/.claude/skills/avenfield-*` are symlinks into this repo, a `git pull`
