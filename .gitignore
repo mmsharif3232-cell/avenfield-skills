@@ -1,0 +1,18 @@
+# NEVER commit real credentials — only the template belongs in git.
+credentials.env
+.env
+*.env
+!*.env.template
+
+# Google service-account JSON / any credential json
+*service-account*.json
+*credentials*.json
+*-key.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
