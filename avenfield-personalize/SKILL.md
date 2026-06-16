@@ -68,7 +68,9 @@ normalize_case, empty_default }`. Saved:
   `{{serviceLine}}` = the service the agency SELLS (what *their* prospects shop
   for), 1-3 words, reads in "companies shopping for ___ help". Model
   `gpt-5-nano`, case-normalized (SEO/PPC/PR uppercase), **spamguard on**, and
-  fallback "growth" (clean — "marketing" is a banned word). Tuned; reuse it.
+  fallback "advertising" (no banned words, and no vague "growth"). The prompt
+  digs out the concrete discipline (paid ads, SEO, video production, PR, …)
+  rather than a generic word. Tuned; reuse it.
 
 Override any field per-run with `--prompt-file`, `--vars`, `--model`,
 `--reasoning-effort`, `--max-chars`, `--default`. Add new campaigns by dropping a
@@ -78,7 +80,8 @@ new JSON in `presets/`.
 When the preset sets `"spamguard": true` (or you pass `--spamguard`), personalize
 pulls `avenfield-spamguard`'s banned-word list and:
 1. **Injects it into the prompt** — the model is told never to output a banned word
-   and to use a clean equivalent (e.g. `marketing→growth`, `sales→revenue`).
+   and to name the concrete clean discipline instead (e.g. `marketing`→`paid ads`/`SEO`),
+   never vague filler like `growth`/`solutions`.
 2. **Scrubs every output as a safety net** — any banned token the model still emits
    is deterministically cleaned (synonym or token-strip), and the low-confidence /
    empty fallback is forced clean too. The run summary reports `spam_cleaned`.

@@ -66,8 +66,8 @@ try:
 except Exception:
     spamguard = None
 
-# common banned-word → clean equivalents for personalization outputs
-SPAM_SYNONYMS = {"marketing": "growth", "performance": "growth", "sales": "revenue",
+# common banned-word → clean equivalents for personalization outputs (never "growth")
+SPAM_SYNONYMS = {"marketing": "advertising", "performance": "advertising", "sales": "revenue",
                  "medical": "healthcare", "financial": "finance-sector", "finance": "finance-sector",
                  "home": "residential", "life": "wellness", "insurance": "risk", "investment": "capital"}
 
@@ -129,9 +129,9 @@ def spam_guidance() -> str:
     words = ", ".join(spamguard.RULES["banned_words"])
     return ("\n\nDELIVERABILITY (must be cold-email safe): NEVER output any of these banned "
             "words or obvious variants: " + words + ". If the natural answer would be a banned "
-            "word, use a clean, plain-language equivalent instead (e.g. marketing→growth, "
-            "sales→revenue, performance→growth, home→residential). Keep it within the length "
-            "rules above.")
+            "word, name the concrete clean discipline instead (e.g. marketing→paid ads / SEO / "
+            "social media, sales→revenue, performance→advertising). Do NOT use vague filler like "
+            "'growth', 'solutions', or 'services'. Keep it within the length rules above.")
 
 
 def spam_clean(v: str) -> str:
@@ -143,7 +143,7 @@ def spam_clean(v: str) -> str:
         return SPAM_SYNONYMS[low]
     toks = [SPAM_SYNONYMS.get(t, t) for t in low.split()
             if re.sub(r"[^a-z]", "", t) not in spamguard._BANNED]
-    return normalize_case(" ".join(toks).strip() or "growth")
+    return normalize_case(" ".join(toks).strip() or "advertising")
 
 
 def _get(sid, rng):
