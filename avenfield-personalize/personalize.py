@@ -53,10 +53,23 @@ if not (_OAI / "ai.py").exists():
 _SH = _HERE.parent / "avenfield-sheets"
 if not (_SH / "sheets.py").exists():
     _SH = Path.home() / ".claude" / "skills" / "avenfield-sheets"
+_SG = _HERE.parent / "avenfield-spamguard"
+if not (_SG / "spamguard.py").exists():
+    _SG = Path.home() / ".claude" / "skills" / "avenfield-spamguard"
 sys.path.insert(0, str(_OAI))
 sys.path.insert(0, str(_SH))
+sys.path.insert(0, str(_SG))
 import ai       # noqa: E402
 import sheets   # noqa: E402
+try:
+    import spamguard  # noqa: E402  — deliverability guardrails (optional)
+except Exception:
+    spamguard = None
+
+# common banned-word → clean equivalents for personalization outputs
+SPAM_SYNONYMS = {"marketing": "growth", "performance": "growth", "sales": "revenue",
+                 "medical": "healthcare", "financial": "finance-sector", "finance": "finance-sector",
+                 "home": "residential", "life": "wellness", "insurance": "risk", "investment": "capital"}
 
 # Approximate list prices, USD per 1M tokens (input, output). Token counts in the
 # reports are exact (from the API usage field); the $ uses this table — override
@@ -107,6 +120,30 @@ def normalize_case(s: str) -> str:
     """Lowercase, but keep marketing acronyms uppercase — copy-ready."""
     s = (s or "").strip().lower()
     return re.sub(r"\b(seo|ppc|pr|ppc|roi|ux|ui|crm)\b", lambda m: m.group(1).upper(), s)
+
+
+def spam_guidance() -> str:
+    """Banned-word guidance injected into the prompt so outputs are cold-email safe."""
+    if not spamguard:
+        return ""
+    words = ", ".join(spamguard.RULES["banned_words"])
+    return ("\n\nDELIVERABILITY (must be cold-email safe): NEVER output any of these banned "
+            "words or obvious variants: " + words + ". If the natural answer would be a banned "
+            "word, use a clean, plain-language equivalent instead (e.g. marketing→growth, "
+            "sales→revenue, performance→growth, home→residential). Keep it within the length "
+            "rules above.")
+
+
+def spam_clean(v: str) -> str:
+    """Deterministic safety net: strip/replace any banned token the model still emitted."""
+    if not (spamguard and isinstance(v, str) and spamguard.word_hits(v)):
+        return v
+    low = v.strip().lower()
+    if low in SPAM_SYNONYMS:
+        return SPAM_SYNONYMS[low]
+    toks = [SPAM_SYNONYMS.get(t, t) for t in low.split()
+            if re.sub(r"[^a-z]", "", t) not in spamguard._BANNED]
+    return normalize_case(" ".join(toks).strip() or "growth")
 
 
 def _get(sid, rng):
@@ -173,6 +210,8 @@ def main():
     ap.add_argument("--no-normalize", action="store_true", help="Skip case-normalizing string outputs.")
     ap.add_argument("--default", help="Value for rows with empty content (no API call). Default from preset.")
     ap.add_argument("--low-conf-fallback", help='Override low-confidence fallback: a literal value or "most_common".')
+    ap.add_argument("--spamguard", action="store_true", help="Inject deliverability rules into the prompt + clean banned words from outputs.")
+    ap.add_argument("--no-spamguard", action="store_true", help="Disable spamguard even if the preset enables it.")
     ap.add_argument("--test", type=int, default=15, help="Rows to process in TEST mode (default 15).")
     ap.add_argument("--run", action="store_true", help="Process the WHOLE sheet (not just --test).")
     ap.add_argument("--estimate", action="store_true", help="Print a no-API cost estimate and exit.")
@@ -211,6 +250,11 @@ def main():
 
     # low-confidence handling (preset-driven): the model self-reports confidence;
     # low-confidence / empty rows get a safe fallback instead of a confident guess.
+    spam_on = (spamguard is not None) and (not args.no_spamguard) \
+        and (args.spamguard or cfg.get("spamguard", False))
+    if spam_on:
+        prompt = prompt + spam_guidance()
+
     conf_var = cfg.get("confidence_var")                       # e.g. "confidence"
     low_vals = cfg.get("confidence_low_values", ["low"])
     fb_var = cfg.get("low_conf_fallback_var") or names[0]      # which var to overwrite
@@ -264,7 +308,7 @@ def main():
     results = {}      # key -> {var: value}
     rows_data = []    # [{row, key, **vars}] — kept so we can apply the fallback pass
     pt = ct = done = 0
-    fail = 0
+    fail = spam_cleaned = 0
     pending = []
     start = time.time()
 
@@ -295,12 +339,20 @@ def main():
                 usage.get("completion_tokens", 0), ok)
 
     def absorb(row_no, key, row_res, p, c, ok):
-        nonlocal pt, ct, done, fail
+        nonlocal pt, ct, done, fail, spam_cleaned
         pt += p
         ct += c
         done += 1
         if not ok:
             fail += 1
+        if spam_on:                               # safety net: scrub any banned word
+            for nm in names:
+                if nm == conf_var:
+                    continue
+                cleaned = spam_clean(row_res.get(nm))
+                if cleaned != row_res.get(nm):
+                    row_res[nm] = cleaned
+                    spam_cleaned += 1
         vals = [row_res[nm] for nm in names]
         rows_data.append({"row": row_no, "key": key, **row_res})
         if key:
@@ -340,6 +392,8 @@ def main():
             fb_value = Counter(highs).most_common(1)[0][0] if highs else generic_fb
         else:
             fb_value = fb_spec
+        if spam_on:                               # the fallback itself must be clean
+            fb_value = spam_clean(fb_value)
         fix = []
         for r in rows_data:
             if r.get(conf_var) in low_vals:
@@ -360,6 +414,9 @@ def main():
     summary = {"mode": mode, "rows": done, "failed": fail, "model": model,
                "prompt_tokens": pt, "completion_tokens": ct,
                "cost_usd": round(actual, 4), "price_per_1M": [disp_in, disp_out]}
+    if spam_on:
+        summary["spamguard"] = True
+        summary["spam_cleaned"] = spam_cleaned
     if conf_var and fb_spec:
         summary["low_confidence_rows"] = low_n
         summary["low_conf_fallback"] = fb_value

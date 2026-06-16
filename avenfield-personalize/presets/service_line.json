@@ -24,7 +24,8 @@
     "low"
   ],
   "low_conf_fallback_var": "service_line",
-  "low_conf_fallback": "marketing",
-  "generic_fallback": "marketing",
-  "empty_default": "marketing"
+  "low_conf_fallback": "growth",
+  "generic_fallback": "growth",
+  "empty_default": "growth",
+  "spamguard": true
 }

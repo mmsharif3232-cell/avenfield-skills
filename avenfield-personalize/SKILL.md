@@ -67,12 +67,23 @@ normalize_case, empty_default }`. Saved:
 - **`service_line`** — RaiseView `ppr-002` (marketing/creative agencies).
   `{{serviceLine}}` = the service the agency SELLS (what *their* prospects shop
   for), 1-3 words, reads in "companies shopping for ___ help". Model
-  `gpt-5-nano`, case-normalized (SEO/PPC/PR uppercase), fallback "digital
-  marketing". This prompt is tuned and gives good results — reuse it.
+  `gpt-5-nano`, case-normalized (SEO/PPC/PR uppercase), **spamguard on**, and
+  fallback "growth" (clean — "marketing" is a banned word). Tuned; reuse it.
 
 Override any field per-run with `--prompt-file`, `--vars`, `--model`,
 `--reasoning-effort`, `--max-chars`, `--default`. Add new campaigns by dropping a
 new JSON in `presets/`.
+
+## Deliverability (spamguard built in)
+When the preset sets `"spamguard": true` (or you pass `--spamguard`), personalize
+pulls `avenfield-spamguard`'s banned-word list and:
+1. **Injects it into the prompt** — the model is told never to output a banned word
+   and to use a clean equivalent (e.g. `marketing→growth`, `sales→revenue`).
+2. **Scrubs every output as a safety net** — any banned token the model still emits
+   is deterministically cleaned (synonym or token-strip), and the low-confidence /
+   empty fallback is forced clean too. The run summary reports `spam_cleaned`.
+Disable per run with `--no-spamguard`. So `{{serviceLine}}` etc. ship cold-email
+safe at the source — no `marketing`, no manual remap afterwards.
 
 ## Notes
 - Models: `gpt-5-nano` (cheapest, default), `gpt-5-mini`, `gpt-4o-mini`. Full
