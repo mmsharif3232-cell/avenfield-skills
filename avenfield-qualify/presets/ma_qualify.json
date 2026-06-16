@@ -1,0 +1,38 @@
+{
+  "_scenario": "M&A advisers US — qualify whether each company is genuinely in the M&A / business-sale advisory space. Reads scraped website markdown. Output: is_ma (true/false), ma_type (category), ma_confidence (high/medium/low), ma_reason (one sentence).",
+  "model": "gpt-4o-mini",
+  "reasoning_effort": "low",
+  "max_chars": 4000,
+  "prompt": "You are qualifying whether a company is a legitimate M&A or business-sale advisory firm based on their website content.\n\nA company QUALIFIES (is_ma = true) if its primary business is advising on the buying or selling of companies — any of:\n- M&A advisory (sell-side, buy-side, deal advisory)\n- Business broker (helping owners sell their businesses, lower-middle market)\n- Investment bank with an M&A / deal practice\n- Private equity or family office actively acquiring businesses\n- Exit planning / succession advisory whose primary product is a business sale transaction\n\nA company DOES NOT QUALIFY (is_ma = false) if it is primarily:\n- Wealth management / financial planning / retirement planning (manages portfolios, not transactions)\n- Insurance advisory / insurance brokerage\n- Accounting / CPA / tax advisory\n- Real estate brokerage or advisory\n- Executive search / recruiting\n- General management consulting with no deal focus\n- Lending / debt advisory / mortgage (not deal-side M&A)\n- A portfolio company, SaaS tool, or non-advisory business\n- A company website with too little content to determine anything\n\nFor ma_type choose ONE of: 'M&A advisory' | 'business broker' | 'investment bank' | 'private equity' | 'exit planning' | 'wealth management' | 'insurance' | 'accounting' | 'lending' | 'recruiting' | 'other'\n\nFor ma_confidence:\n- 'high': the website clearly and explicitly states M&A / deal / buy-sell advisory as its primary service\n- 'medium': the site suggests M&A involvement but is ambiguous or mixes in other services\n- 'low': the site is thin, blocked, or you cannot determine the primary business\n\nFor ma_reason: one concise sentence (max 15 words) explaining your classification based on what the site says.\n\nIf the content is empty or has fewer than 20 meaningful words, set is_ma to false, ma_type to 'other', ma_confidence to 'low', and ma_reason to 'site content too thin to classify'.",
+  "vars": [
+    {
+      "name": "is_ma",
+      "type": "boolean",
+      "header": "is_ma",
+      "description": "true if this is a genuine M&A / business-sale advisory firm, false otherwise"
+    },
+    {
+      "name": "ma_type",
+      "type": "string",
+      "header": "ma_type",
+      "description": "one of: M&A advisory | business broker | investment bank | private equity | exit planning | wealth management | insurance | accounting | lending | recruiting | other"
+    },
+    {
+      "name": "ma_confidence",
+      "type": "string",
+      "header": "ma_confidence",
+      "description": "exactly 'high', 'medium', or 'low'"
+    },
+    {
+      "name": "ma_reason",
+      "type": "string",
+      "header": "ma_reason",
+      "description": "one sentence (max 15 words) explaining the classification"
+    }
+  ],
+  "confidence_var": "ma_confidence",
+  "confidence_low_values": ["low"],
+  "generic_fallback": null,
+  "empty_default": null,
+  "spamguard": false
+}

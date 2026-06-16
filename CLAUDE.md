@@ -63,5 +63,6 @@ already has access). Keep it current — it's the single index of what we're run
 - `avenfield-sheets` — read/write any Google Sheet via the service account (incl. create/share/row-height/wrap).
 - `avenfield-openai` — full OpenAI access (chat, extract, raw passthrough).
 - `avenfield-personalize` — GPT personalization over scraped data (presets, test-first, cost estimate, spamguard, auto-retry, map-back).
+- `avenfield-qualify` — qualify a list against an ICP (classify from scraped markdown → is_ma/type/confidence) then extract only the winning lead rows into a new tab.
 - `avenfield-spamguard` — always-on deliverability/spam scan for all copy (run before anything ships).
 - `avenfield-spintax` — spintax copy into Instantly {{RANDOM|...}} format (8 rules) + deterministic audit (count, banned scan, article/format).
