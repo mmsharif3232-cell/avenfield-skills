@@ -48,9 +48,13 @@ python3 $P --sheet "<ID>" --tab "browser render" --content-col F --key-col A \
 - `--content-col` = where the markdown is; `--key-col` = the match key (Website).
 - Variables are written one-per-column starting at `--out-col`; the header row
   gets each var's `header` (or name).
-- Rows with **empty content** (failed renders) are filled with the preset's
-  `empty_default` ("digital marketing") with no API call — so the sheet is
-  complete and no `{{serviceLine}}` ships blank. Override with `--default`.
+- **Low-confidence handling.** The model self-reports `confidence` (high/low) and
+  it's written to its own column (marked). Thin / nav-only / blocked / empty pages
+  are flagged `low` and their service line is REPLACED by a safe fallback:
+  `low_conf_fallback` = `most_common` (the most frequent service line across the
+  confident rows) or a literal like `marketing`. Empty-content rows (failed
+  renders) are treated as low-confidence too — no API call. Override per run with
+  `--low-conf-fallback marketing` (or `--default`).
 - `--map-*` writes one variable (`--map-var`, default the first) onto another tab,
   matched by normalized website — the dedupe→render→personalize→main flow.
 

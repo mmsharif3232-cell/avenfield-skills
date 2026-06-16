@@ -1,17 +1,30 @@
 {
-  "_scenario": "RaiseView ppr-002 \u2014 cold email to marketing/creative agencies. {{serviceLine}} = the service the agency SELLS (what their prospects shop for). Reads in: 'companies shopping for ___ help'.",
+  "_scenario": "RaiseView ppr-002 \u2014 cold email to marketing/creative agencies. {{serviceLine}} = the service the agency SELLS (what their prospects shop for). Reads in: 'companies shopping for ___ help'. Low-confidence/thin-content rows are flagged and replaced with the most common service line across confident rows (generic 'marketing' if none).",
   "model": "gpt-5-nano",
   "reasoning_effort": "minimal",
   "max_chars": 3500,
   "normalize_case": true,
-  "prompt": "You label B2B marketing, creative, and digital companies with the ONE service line they are best known for \u2014 the primary service a prospective client would hire them for \u2014 based on their website content.\n\nOutput rules:\n- 1 to 3 words. Lowercase, EXCEPT keep common acronyms uppercase: SEO, PPC, PR.\n- It must read naturally in this sentence: \"companies shopping for ___ help\" and \"a few in ___ territory\".\n- Pick their PRIMARY / headline service. Use the services shown in their nav/hero. If they are broadly full-service with no dominant specialty, output \"digital marketing\".\n- Prefer one of these when it fits: SEO, PPC, paid media, paid social, social media marketing, content marketing, email marketing, web design, web development, branding, public relations, video production, demand generation, lead generation, ecommerce marketing, influencer marketing, media buying, experiential marketing, creative production, digital marketing.\n- If the company clearly specializes in something NOT on that list, output that specialty in 1-3 words (e.g. \"Amazon marketing\", \"app development\", \"conversion optimization\", \"event production\", \"podcast production\").\n- NEVER output: the company name, a tagline, a full sentence, or the word \"agency\".\n- If the content is empty or unreadable, output \"digital marketing\".",
+  "prompt": "You label B2B marketing, creative, and digital companies with the ONE service line they are best known for \u2014 the primary service a prospective client would hire them for \u2014 based on their website content, AND you judge how confident you are.\n\nservice_line rules:\n- 1 to 3 words. Lowercase, EXCEPT keep common acronyms uppercase: SEO, PPC, PR.\n- Must read naturally in: \"companies shopping for ___ help\" and \"a few in ___ territory\".\n- Pick their PRIMARY / headline service from their nav/hero. If broadly full-service with no dominant specialty, output \"digital marketing\".\n- Prefer one of these when it fits: SEO, PPC, paid media, paid social, social media marketing, content marketing, email marketing, web design, web development, branding, public relations, video production, demand generation, lead generation, ecommerce marketing, influencer marketing, media buying, experiential marketing, creative production, digital marketing.\n- If they clearly specialize in something off-list, output that specialty in 1-3 words (e.g. \"Amazon marketing\", \"app development\", \"dental marketing\").\n- NEVER output the company name, a tagline, a sentence, or the word \"agency\".\n\nconfidence rules:\n- \"high\" = the page clearly shows what they sell (services nav, hero copy, case studies) and you can name the primary service.\n- \"low\" = the content is thin, navigation-only, blocked, an error/parked/empty page, or you genuinely cannot tell what they sell. Still give your best-guess service_line, but set confidence to \"low\".\n- Output confidence as exactly \"high\" or \"low\".",
   "vars": [
     {
       "name": "service_line",
       "type": "string",
       "header": "service line",
-      "description": "the company's primary service line, 1-3 words, following the rules"
+      "description": "primary service line, 1-3 words, per the rules"
+    },
+    {
+      "name": "confidence",
+      "type": "string",
+      "header": "sl_confidence",
+      "description": "exactly 'high' or 'low' per the rules"
     }
   ],
-  "empty_default": "digital marketing"
+  "confidence_var": "confidence",
+  "confidence_low_values": [
+    "low"
+  ],
+  "low_conf_fallback_var": "service_line",
+  "low_conf_fallback": "most_common",
+  "generic_fallback": "marketing",
+  "empty_default": "marketing"
 }

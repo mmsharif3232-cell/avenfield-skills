@@ -166,6 +166,7 @@ def main():
     ap.add_argument("--max-chars", type=int, help="Truncate content fed to the model (default 3500).")
     ap.add_argument("--no-normalize", action="store_true", help="Skip case-normalizing string outputs.")
     ap.add_argument("--default", help="Value for rows with empty content (no API call). Default from preset.")
+    ap.add_argument("--low-conf-fallback", help='Override low-confidence fallback: a literal value or "most_common".')
     ap.add_argument("--test", type=int, default=15, help="Rows to process in TEST mode (default 15).")
     ap.add_argument("--run", action="store_true", help="Process the WHOLE sheet (not just --test).")
     ap.add_argument("--estimate", action="store_true", help="Print a no-API cost estimate and exit.")
@@ -200,6 +201,14 @@ def main():
     headers = [v.get("header", v["name"]) for v in vars_spec]
     names = [v["name"] for v in vars_spec]
 
+    # low-confidence handling (preset-driven): the model self-reports confidence;
+    # low-confidence / empty rows get a safe fallback instead of a confident guess.
+    conf_var = cfg.get("confidence_var")                       # e.g. "confidence"
+    low_vals = cfg.get("confidence_low_values", ["low"])
+    fb_var = cfg.get("low_conf_fallback_var") or names[0]      # which var to overwrite
+    fb_spec = args.low_conf_fallback or cfg.get("low_conf_fallback")  # literal | "most_common" | None
+    generic_fb = cfg.get("generic_fallback", "marketing")
+
     sid = sheets._sheet_id(args.sheet)
     ccol = args.content_col.strip().upper()
     out0 = col_to_idx(args.out_col.strip().upper())
@@ -209,14 +218,17 @@ def main():
     key_vals = _get(sid, a1(args.tab, args.key_col.strip().upper(), args.start_row)
                     + f":{args.key_col.strip().upper()}") if args.key_col else []
     empty_default = args.default if args.default is not None else cfg.get("empty_default")
-    jobs = []  # (row_no, key, content)  — content None means "use empty_default, no API"
+    # include empty-content rows when we have any way to fill them (a default,
+    # or the low-confidence fallback) so the sheet ends up complete.
+    include_empty = (empty_default is not None) or bool(conf_var and fb_spec)
+    jobs = []  # (row_no, key, content)  — content None means "empty source, no API call"
     span = max(len(content_vals), len(key_vals))
     for i in range(span):
         c = content_vals[i][0] if (i < len(content_vals) and content_vals[i]) else ""
         key = key_vals[i][0] if (i < len(key_vals) and key_vals[i]) else ""
         if c and c.strip():
             jobs.append((args.start_row + i, key, c[:max_chars]))
-        elif key and key.strip() and empty_default is not None:
+        elif key and key.strip() and include_empty:
             jobs.append((args.start_row + i, key, None))
     if not jobs:
         sys.exit("No content rows found — check --tab / --content-col / --start-row.")
@@ -242,6 +254,7 @@ def main():
     print(f"{mode}: {n} rows · model={model}{' · '+str(extra) if extra else ''}")
 
     results = {}      # key -> {var: value}
+    rows_data = []    # [{row, key, **vars}] — kept so we can apply the fallback pass
     pt = ct = done = 0
     fail = 0
     pending = []
@@ -253,8 +266,10 @@ def main():
         pending = []
 
     for row_no, key, content in todo:
-        if content is None:                       # empty source → fallback, no API call
-            vals = [empty_default for _ in names]
+        if content is None:                       # empty source → mark low, no API call
+            row_res = {nm: "" for nm in names}
+            if conf_var:
+                row_res[conf_var] = low_vals[0]
             done += 1
         else:
             status, res, usage = extract_one(content, schema, model, prompt, extra)
@@ -264,15 +279,18 @@ def main():
             ok = "_error" not in res
             if not ok:
                 fail += 1
-            vals = []
+            row_res = {}
             for nm in names:
                 v = res.get(nm, "") if ok else ""
                 if normalize and isinstance(v, str):
                     v = normalize_case(v)
-                vals.append(v)
+                row_res[nm] = v
+            if not ok and conf_var:               # API failure → treat as low confidence
+                row_res[conf_var] = low_vals[0]
+        vals = [row_res[nm] for nm in names]
+        rows_data.append({"row": row_no, "key": key, **row_res})
         if key:
-            results[norm_url(key)] = dict(zip(names, vals))
-        # write this row's variables across out-cols
+            results[norm_url(key)] = dict(row_res)
         for j, v in enumerate(vals):
             pending.append({"range": a1(args.tab, idx_to_col(out0 + j), row_no),
                             "values": [[v]]})
@@ -286,6 +304,29 @@ def main():
                      [[f"{done}/{n} · ${cost:.4f} · {done/max(1,time.time()-start)*60:.0f}/min"]])
 
     flush()
+
+    # --- low-confidence fallback pass: replace unsure/empty guesses with a safe value ---
+    low_n = 0
+    fb_value = None
+    if conf_var and fb_spec:
+        from collections import Counter
+        highs = [r[fb_var] for r in rows_data
+                 if r.get(conf_var) not in low_vals and r.get(fb_var)]
+        if fb_spec == "most_common":
+            fb_value = Counter(highs).most_common(1)[0][0] if highs else generic_fb
+        else:
+            fb_value = fb_spec
+        fix = []
+        for r in rows_data:
+            if r.get(conf_var) in low_vals:
+                low_n += 1
+                if r.get(fb_var) != fb_value:
+                    r[fb_var] = fb_value
+                    fix.append({"range": a1(args.tab, idx_to_col(out0 + names.index(fb_var)),
+                                            r["row"]), "values": [[fb_value]]})
+                    if r["key"]:
+                        results[norm_url(r["key"])][fb_var] = fb_value
+        _batch(sid, fix)
     # write headers above the out-cols (if there's a header row)
     if args.start_row > 1:
         _batch(sid, [{"range": a1(args.tab, idx_to_col(out0 + j), args.start_row - 1),
@@ -295,6 +336,10 @@ def main():
     summary = {"mode": mode, "rows": done, "failed": fail, "model": model,
                "prompt_tokens": pt, "completion_tokens": ct,
                "cost_usd": round(actual, 4), "price_per_1M": [disp_in, disp_out]}
+    if conf_var and fb_spec:
+        summary["low_confidence_rows"] = low_n
+        summary["low_conf_fallback"] = fb_value
+        summary["confident_rows"] = done - low_n
 
     # TEST → extrapolate the full-sheet cost
     if not args.run:
