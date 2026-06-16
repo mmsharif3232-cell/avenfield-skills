@@ -16,6 +16,7 @@ pipeline. You ask in plain English; Claude runs the skill.
 | `avenfield-openai` | Full OpenAI access — raw passthrough to any /v1 endpoint + `chat` and `extract` (single + batch) |
 | `avenfield-personalize` | Generate cold-email merge variables ({{serviceLine}}…) from scraped website data — saved prompt presets, test-first, cost estimate before the full run, live progress, map back into the main sheet |
 | `avenfield-instantly-upload` | Upload a Google Sheet of leads into an Instantly campaign — column→field/merge-var mapping, drops bad/dupe emails, fills blank tags, test-first then bulk (idempotent), never launches |
+| `avenfield-spamguard` | Always-on deliverability/spam scan for copy — banned words/phrases, promotional/phishing wording, formatting bans; suggests rewrites, scans live Instantly sequences, rewrites risky company names |
 
 Your existing copy/spintax/spamguard skills stay as-is — these complete the set.
 

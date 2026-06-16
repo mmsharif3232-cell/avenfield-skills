@@ -22,7 +22,9 @@ that others rely on), do a fast sanity pass:
 1. **Right audience** — correct campaign, correct lead list, no test rows, no dupes.
 2. **Right content** — no broken merge tags / spintax (`{{firstName}}`, `{first|second}`
    left unrendered), no placeholder text (`XXXX`, `[COMPANY]`, "Hi there,"), no
-   "Re:" fakery unless intended.
+   "Re:" fakery unless intended. **Run `avenfield-spamguard` on any copy before it
+   ships** — subjects, bodies, follow-ups — and remember merge variables can smuggle
+   banned words in (e.g. `{{serviceLine}}` = "marketing"), so scan rendered values too.
 3. **Right recipients** — emails verified (use `avenfield-verify`); drop invalid /
    disposable / role addresses unless explicitly told otherwise.
 4. **Right links & names** — personalization fields resolve, company/first-name
