@@ -1,6 +1,6 @@
 ---
 name: avenfield-browser-render
-description: "Render, scrape, screenshot, or extract from ANY website using Cloudflare Browser Rendering. Use ANY TIME Momin wants to pull content from a URL or list of URLs — 'render this site', 'scrape these domains', 'get the markdown for', 'screenshot this page', 'pull the homepage content', 'crawl this site', 'extract X from these websites', 'what does this company's site say', 'grab the about page', or any lead-research / personalization task that needs live website content. This is the raw Cloudflare Browser Rendering capability with full option pass-through — single page or batch, markdown / HTML / screenshot / PDF / structured-JSON / element-scrape / links. It replaces the old console's fixed render flow: here you can render anything with any options. Does NOT verify emails, write copy, or push to Instantly — it only fetches/renders web content."
+description: "Render, scrape, screenshot, or extract from ANY website using Cloudflare Browser Rendering. Use ANY TIME Momin wants to pull content from a URL or list of URLs — 'render this site', 'scrape these domains', 'get the markdown for', 'screenshot this page', 'pull the homepage content', 'crawl this site', 'extract X from these websites', 'what does this company's site say', 'grab the about page', or any lead-research / personalization task that needs live website content. ALSO the go-to when Momin gives a Google Sheet of URLs and wants the rendered markdown (or extracted JSON) written into the next column — use render_sheet.py for that. This is the raw Cloudflare Browser Rendering capability with full option pass-through — single page or batch, markdown / HTML / screenshot / PDF / structured-JSON / element-scrape / links. It replaces the old console's fixed render flow: here you can render anything with any options. Does NOT verify emails, write copy, or push to Instantly — it only fetches/renders web content."
 ---
 
 # Avenfield Browser Render
@@ -64,20 +64,44 @@ python3 .../cf_render.py screenshot --url https://acme.com --out acme.png \
   --body '{"viewport":{"width":1440,"height":900},"screenshotOptions":{"fullPage":true}}'
 ```
 
-**Batch — many URLs at once** (one per line on stdin → JSONL out, one object per URL):
+**Batch — many URLs at once, IN PARALLEL** (one per line on stdin → JSONL out, one object per URL). Default 6 concurrent renders; bump with `--concurrency`. Output order matches input order. Each line: `{"url","ok","status","result"}`, with retries on transient errors:
 ```bash
 printf 'https://a.com\nhttps://b.com\nhttps://c.com\n' \
-  | python3 .../cf_render.py markdown --batch
+  | python3 .../cf_render.py markdown --batch --concurrency 8
 ```
 
-## Working with lead lists
+## ⭐ Sheet → render → next column (the fast default for lead lists)
 
-When Momin gives you a list of domains (CSV, sheet, pasted), the usual flow is:
-1. Pull the URL column.
-2. Run `--batch markdown` (or `--batch json` with a schema) over them.
-3. Read each result and produce whatever he asked for — a personalization line, a summary, an extracted field — and write it back to wherever the leads live (sheet, CSV, or just the chat).
+When Momin gives a **Google Sheet (link or ID) of URLs** and says "render these / give me the markdown in the next column", use **`render_sheet.py`** — it reads the URL column, renders every URL **concurrently**, and writes each result into the output column in a single Sheets write. No looping by hand.
 
-For one-off research ("what does this company do?"), a single `markdown` call is enough — read it and answer.
+```bash
+R=~/.claude/skills/avenfield-browser-render/render_sheet.py
+
+# URLs in column A, header in row 1, markdown lands in column B:
+python3 $R --sheet "<sheet URL or ID>" --url-col A --start-row 2
+
+# Choose tab, output column, endpoint, and parallelism:
+python3 $R --sheet <ID> --tab Leads --url-col C --out-col D \
+  --endpoint markdown --concurrency 10 --start-row 2 --out-header "Markdown"
+
+# Structured extraction instead of raw markdown (CF runs the LLM server-side):
+python3 $R --sheet <ID> --url-col A --start-row 2 --endpoint json \
+  --body '{"prompt":"founder, city, one-line value prop","response_format":{...}}'
+
+# Preview first — render but DON'T write, see the first 5 rows:
+python3 $R --sheet <ID> --url-col A --start-row 2 --dry-run
+```
+
+Behaviour worth knowing:
+- `--out-col` defaults to the column right of `--url-col`. Point it at an EMPTY column so nothing is overwritten — writes are surgical (only the cells we computed).
+- `--start-row 2` skips a header row (default is 1). Row alignment is preserved: row N's URL → row N's output cell, blank URL rows are skipped.
+- Cells are truncated to `--max-chars` (default 45000; Google's hard cap is 50000) with a `…[truncated]` marker.
+- Failures aren't silent — the cell gets a `[render failed <status>: …]` marker and the run summary lists `failed_rows`.
+- The target sheet must be shared (Editor) with the SA email (`avenfield-sheets/sheets.py whoami`); a 403 means it isn't.
+
+**Sanity pass before writing** (per CLAUDE.md): confirm it's the right sheet/tab, the URL column is the one you think, and the output column is empty. For a big run, do a `--dry-run` first.
+
+For one-off research ("what does this company do?"), a single `markdown` call is enough — read it and answer. For a pasted/CSV list (not a sheet), pipe it through `--batch` and read the JSONL.
 
 ## Notes
 - `markdown` is the default best choice for anything an LLM will read.
