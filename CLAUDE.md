@@ -55,3 +55,4 @@ session.
 - `avenfield-openai` — full OpenAI access (chat, extract, raw passthrough).
 - `avenfield-personalize` — GPT personalization over scraped data (presets, test-first, cost estimate, spamguard, auto-retry, map-back).
 - `avenfield-spamguard` — always-on deliverability/spam scan for all copy (run before anything ships).
+- `avenfield-spintax` — spintax copy into Instantly {{RANDOM|...}} format (8 rules) + deterministic audit (count, banned scan, article/format).
