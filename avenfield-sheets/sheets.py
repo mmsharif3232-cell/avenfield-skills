@@ -40,7 +40,9 @@ from pathlib import Path
 
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 SHEETS = "https://sheets.googleapis.com/v4/spreadsheets"
+DRIVE = "https://www.googleapis.com/drive/v3"
 SCOPE = "https://www.googleapis.com/auth/spreadsheets"
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 
 
 def _load_env_file(path: Path) -> dict:
@@ -99,17 +101,18 @@ def _sign_rs256(signing_input: str, private_key_pem: str) -> str:
             pass
 
 
-_token_cache: dict = {}
+_token_cache: dict = {}   # scope -> {"tok", "exp"}
 
 
-def _access_token() -> str:
-    if _token_cache.get("exp", 0) > time.time() + 60:
-        return _token_cache["tok"]
+def _access_token(scope: str = SCOPE) -> str:
+    cached = _token_cache.get(scope)
+    if cached and cached["exp"] > time.time() + 60:
+        return cached["tok"]
     sa = _sa()
     now = int(time.time())
     header = _b64u(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
     claim = _b64u(json.dumps({
-        "iss": sa["client_email"], "scope": SCOPE,
+        "iss": sa["client_email"], "scope": scope,
         "aud": TOKEN_URL, "iat": now, "exp": now + 3600,
     }).encode())
     assertion = f"{header}.{claim}." + _sign_rs256(f"{header}.{claim}", sa["private_key"])
@@ -124,14 +127,14 @@ def _access_token() -> str:
             tok = json.loads(r.read())
     except urllib.error.HTTPError as e:
         sys.exit(f"Token mint failed {e.code}: {e.read().decode()[:300]}")
-    _token_cache.update(tok=tok["access_token"], exp=now + 3600)
+    _token_cache[scope] = {"tok": tok["access_token"], "exp": now + 3600}
     return tok["access_token"]
 
 
-def _api(method: str, url: str, body: dict | None = None) -> dict:
+def _api(method: str, url: str, body: dict | None = None, scope: str = SCOPE) -> dict:
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {_access_token()}")
+    req.add_header("Authorization", f"Bearer {_access_token(scope)}")
     if data is not None:
         req.add_header("Content-Type", "application/json")
     try:
@@ -139,7 +142,7 @@ def _api(method: str, url: str, body: dict | None = None) -> dict:
             raw = r.read()
             return json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
-        sys.exit(f"Sheets API {e.code} on {method}: {e.read().decode()[:400]}")
+        sys.exit(f"API {e.code} on {method}: {e.read().decode()[:400]}")
 
 
 def _sheet_id(s: str) -> str:
@@ -217,9 +220,32 @@ def cmd_set_wrap(args):
 
 
 def cmd_create(args):
-    data = _api("POST", SHEETS, {"properties": {"title": args.title}})
-    print(json.dumps({"id": data.get("spreadsheetId"),
-                      "url": data.get("spreadsheetUrl")}, indent=2))
+    # A service account has no personal Drive quota, so a bare Sheets create 403s.
+    # Creating inside a shared Drive folder (via the Drive API) uses the folder's
+    # quota and works — that's what --folder is for.
+    folder = args.folder or _load_env_file(Path.home() / ".avenfield" / "credentials.env").get("SHEETS_PARENT_FOLDER_ID")
+    if folder:
+        meta = {"name": args.title,
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+                "parents": [folder]}
+        data = _api("POST", f"{DRIVE}/files?supportsAllDrives=true", meta, scope=DRIVE_SCOPE)
+        sid = data.get("id")
+        print(json.dumps({"id": sid, "folder": folder,
+                          "url": f"https://docs.google.com/spreadsheets/d/{sid}/edit"}, indent=2))
+    else:
+        data = _api("POST", SHEETS, {"properties": {"title": args.title}})
+        print(json.dumps({"id": data.get("spreadsheetId"),
+                          "url": data.get("spreadsheetUrl")}, indent=2))
+
+
+def cmd_share(args):
+    """Share a sheet with a person (Drive permissions). Needs the Drive API enabled."""
+    sid = _sheet_id(args.sheet)
+    body = {"role": args.role, "type": "user", "emailAddress": args.email}
+    q = f"sendNotificationEmail={'true' if args.notify else 'false'}"
+    data = _api("POST", f"{DRIVE}/files/{sid}/permissions?{q}", body, scope=DRIVE_SCOPE)
+    print(json.dumps({"shared": sid, "with": args.email,
+                      "role": args.role, "permissionId": data.get("id")}, indent=2))
 
 
 def cmd_set_row_height(args):
@@ -260,7 +286,13 @@ def main():
     p = ws(sub.add_parser("set-wrap")); p.add_argument("--title", required=True)
     p.add_argument("--strategy", choices=["CLIP", "WRAP", "OVERFLOW_CELL"], default="CLIP")
     p.set_defaults(fn=cmd_set_wrap)
-    p = sub.add_parser("create"); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_create)
+    p = sub.add_parser("create"); p.add_argument("--title", required=True)
+    p.add_argument("--folder", help="Drive folder ID to create in (defaults to SHEETS_PARENT_FOLDER_ID).")
+    p.set_defaults(fn=cmd_create)
+    p = ws(sub.add_parser("share")); p.add_argument("--email", required=True)
+    p.add_argument("--role", default="writer", choices=["reader", "commenter", "writer"])
+    p.add_argument("--notify", action="store_true", help="Send Google's share-notification email.")
+    p.set_defaults(fn=cmd_share)
 
     args = ap.parse_args()
     args.fn(args)
