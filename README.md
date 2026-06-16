@@ -11,10 +11,11 @@ pipeline. You ask in plain English; Claude runs the skill.
 |-------|-----------|
 | `avenfield-browser-render` | Render / scrape / screenshot / extract any site via Cloudflare Browser Rendering (markdown, HTML, screenshot, PDF, structured JSON, element scrape, links — single or batch) |
 | `avenfield-verify` | Verify email deliverability via OmniVerifier (valid / catch-all / invalid / disposable / role) |
-| `avenfield-instantly` | Drive Instantly v2 — list campaigns, add leads, push sequences, or any endpoint (generic passthrough) |
+| `avenfield-instantly` | Drive Instantly v2 — list campaigns, add leads (single or bulk via `push-leads`), push sequences, or any endpoint (generic passthrough) |
 | `avenfield-sheets` | Read/write any Google Sheet via the service-account JSON (share the sheet with the SA email) |
 | `avenfield-openai` | Full OpenAI access — raw passthrough to any /v1 endpoint + `chat` and `extract` (single + batch) |
 | `avenfield-personalize` | Generate cold-email merge variables ({{serviceLine}}…) from scraped website data — saved prompt presets, test-first, cost estimate before the full run, live progress, map back into the main sheet |
+| `avenfield-instantly-upload` | Upload a Google Sheet of leads into an Instantly campaign — column→field/merge-var mapping, drops bad/dupe emails, fills blank tags, test-first then bulk (idempotent), never launches |
 
 Your existing copy/spintax/spamguard skills stay as-is — these complete the set.
 
