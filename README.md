@@ -65,9 +65,14 @@ existing skills.
 
 ## Security notes
 
+- A **pre-commit hook** (`.githooks/pre-commit`, enabled by `install.sh`) blocks
+  any commit that contains a secret-shaped value or a sensitive filename, as a
+  backstop to `.gitignore`. Override a false positive with `ALLOW_SECRET=1 git
+  commit …` or `git commit --no-verify`.
 - This puts your provider keys on every device that installs the skills. That's
   the trade-off for full local flexibility and no server dependency. Keep the
   devices trusted; rotate keys if a device is lost.
 - If you'd rather keep keys in ONE place and hand out revocable per-person
   tokens instead, the skills can be pointed at a hosted proxy — ask and we'll
   switch the transport without changing how the skills feel.
+
