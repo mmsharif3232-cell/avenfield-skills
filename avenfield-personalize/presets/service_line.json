@@ -4,7 +4,7 @@
   "reasoning_effort": "minimal",
   "max_chars": 3500,
   "normalize_case": true,
-  "prompt": "You label B2B marketing, creative, and digital companies with the ONE service line they are best known for \u2014 the primary service a prospective client would hire them for \u2014 based on their website content, AND you judge how confident you are.\n\nservice_line rules:\n- 1 to 3 words. Lowercase, EXCEPT keep common acronyms uppercase: SEO, PPC, PR.\n- Must read naturally in: \"companies shopping for ___ help\" and \"a few in ___ territory\".\n- Pick their PRIMARY / headline service from their nav/hero. If broadly full-service with no dominant specialty, output \"digital marketing\".\n- Prefer one of these when it fits: SEO, PPC, paid media, paid social, social media marketing, content marketing, email marketing, web design, web development, branding, public relations, video production, demand generation, lead generation, ecommerce marketing, influencer marketing, media buying, experiential marketing, creative production, digital marketing.\n- If they clearly specialize in something off-list, output that specialty in 1-3 words (e.g. \"Amazon marketing\", \"app development\", \"dental marketing\").\n- NEVER output the company name, a tagline, a sentence, or the word \"agency\".\n\nconfidence rules:\n- \"high\" = the page clearly shows what they sell (services nav, hero copy, case studies) and you can name the primary service.\n- \"low\" = the content is thin, navigation-only, blocked, an error/parked/empty page, or you genuinely cannot tell what they sell. Still give your best-guess service_line, but set confidence to \"low\".\n- Output confidence as exactly \"high\" or \"low\".",
+  "prompt": "You identify the ONE primary service a B2B marketing/creative/digital company is best known for \u2014 the concrete discipline a prospective client would hire them for \u2014 by reading their website content. The label goes into a cold email, so it must be specific and deliverability-safe.\n\nOutput:\n- 1 to 3 words. Lowercase, except keep acronyms uppercase: SEO, PPC, PR.\n- Name the CONCRETE discipline they lead with (from their nav, hero, services, case studies). The kind of specificity wanted: SEO, paid ads, social media, content, branding, web design, web development, public relations, video production, email outreach, lead generation, demand generation, media buying, creative, copywriting, ecommerce, Amazon ads, influencer, experiential, UX design, analytics, app development.\n- It must read naturally in: \"companies shopping for ___ help\" and \"a few in ___ territory\".\n\nHard rules (deliverability):\n- NEVER output any of these banned words or obvious variants (hyphenated or joined): get, bank, credit, access, open, compare, problem, now, billing, deal, finance, financial, claims, insurance, mortgage, soon, new, performance, freedom, home, sales, medical, urgent, life, marketing, investment, diagnostics, friend, cash, invoice, extra, purchase.\n- In particular NEVER output \"marketing\", \"sales\", or \"performance\". If their headline word would be one of these, replace it with the concrete sub-discipline they actually focus on (a \"digital marketing agency\" that mostly runs Google/Meta ads -> \"paid ads\"; one focused on ranking -> \"SEO\"; one focused on posts -> \"social media\").\n- Do NOT output vague filler: no \"growth\", \"solutions\", \"services\", \"strategy\" (alone), \"agency\", \"consulting\" (alone), or \"digital\" (alone).\n- Do NOT output the company name, a tagline, or a sentence.\n\nWhen unsure:\n- If the site is thin/blocked/empty or you genuinely cannot tell, set confidence \"low\" and give your best concrete guess; if truly nothing is determinable, output \"advertising\".\n- Otherwise set confidence \"high\".",
   "vars": [
     {
       "name": "service_line",
@@ -24,8 +24,8 @@
     "low"
   ],
   "low_conf_fallback_var": "service_line",
-  "low_conf_fallback": "growth",
-  "generic_fallback": "growth",
-  "empty_default": "growth",
+  "low_conf_fallback": "advertising",
+  "generic_fallback": "advertising",
+  "empty_default": "advertising",
   "spamguard": true
 }
