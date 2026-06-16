@@ -39,9 +39,19 @@ for speed.
 Sends, bulk lead pushes, and destructive sheet/Instantly writes are hard to undo.
 For those, run the sanity pass above first. For reversible work, just execute.
 
+### Keep the skills updated
+Whenever you build a new capability, fix a behaviour, or learn a better workflow,
+fold it back into the relevant skill (the script + its `SKILL.md`) and commit +
+push — don't leave it as a one-off script. The skills are the durable record of
+how we run campaigns; a fix that only lives in a chat is a fix that's lost next
+session.
+
 ## The Skills (see README.md for full detail)
-- `avenfield-browser-render` — render / scrape / screenshot / extract any site.
+- `avenfield-browser-render` — render / scrape / screenshot / extract any site (single, batch, or dedupe-column → sidecar tab → map back).
 - `avenfield-verify` — verify email deliverability (valid / catch-all / invalid / disposable / role).
-- `avenfield-instantly` — drive Instantly v2 (campaigns, leads, sequences, generic passthrough).
-- `avenfield-sheets` — read/write any Google Sheet via the service account.
+- `avenfield-instantly` — drive Instantly v2 (campaigns, leads incl. bulk push-leads, sequences, generic passthrough).
+- `avenfield-instantly-upload` — upload a sheet of leads into a campaign (column→field/var mapping, test-first, idempotent, never launches).
+- `avenfield-sheets` — read/write any Google Sheet via the service account (incl. create/share/row-height/wrap).
 - `avenfield-openai` — full OpenAI access (chat, extract, raw passthrough).
+- `avenfield-personalize` — GPT personalization over scraped data (presets, test-first, cost estimate, spamguard, auto-retry, map-back).
+- `avenfield-spamguard` — always-on deliverability/spam scan for all copy (run before anything ships).
