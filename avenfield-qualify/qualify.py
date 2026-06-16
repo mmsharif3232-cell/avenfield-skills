@@ -81,8 +81,21 @@ def resolve_col(spec: str, headers: list[str]) -> int:
     raise SystemExit(f"Column {spec!r} not found. Headers: {headers}")
 
 
+def _range(tab: str, cells: str = "A1:ZZ") -> str:
+    """Build a Sheets API range string, URL-encoding the tab name for path use."""
+    import urllib.parse
+    return urllib.parse.quote(tab, safe="") + "!" + cells
+
+
+def _range_body(tab: str, cells: str = "A1:ZZ") -> str:
+    """Build a range string for use inside JSON request bodies (single-quote tabs with spaces/& etc)."""
+    if any(c in tab for c in (" ", "&", "'", "!")):
+        tab = "'" + tab.replace("'", "''") + "'"
+    return tab + "!" + cells
+
+
 def read_tab(sheet_id: str, tab: str) -> list[list[str]]:
-    raw = sh._api("GET", f"{sh.SHEETS}/{sheet_id}/values/{tab}!A1:ZZ", None)
+    raw = sh._api("GET", f"{sh.SHEETS}/{sheet_id}/values/{_range(tab)}", None)
     return raw.get("values", [])
 
 
@@ -186,7 +199,6 @@ def cmd_extract(args):
         return
 
     # 3. write to dest tab (create if missing, else clear first)
-    # Ensure the tab has enough rows for our data
     needed_rows = max(len(out) + 10, 100)
     tabs_meta = sh._api("GET", f"{sh.SHEETS}/{args.sheet}", None).get("sheets", [])
     titles = {t["properties"]["title"]: t["properties"] for t in tabs_meta}
@@ -197,7 +209,6 @@ def cmd_extract(args):
                                                             "columnCount": 26}}}}
         ]})
     else:
-        # Expand row count if needed
         props = titles[args.dest_tab]
         sid = props["sheetId"]
         cur_rows = props.get("gridProperties", {}).get("rowCount", 1000)
@@ -208,14 +219,14 @@ def cmd_extract(args):
                                    "gridProperties": {"rowCount": needed_rows}},
                     "fields": "gridProperties.rowCount"}}
             ]})
-        sh._api("POST", f"{sh.SHEETS}/{args.sheet}/values/{args.dest_tab}!A1:ZZ:clear", {})
+        sh._api("POST", f"{sh.SHEETS}/{args.sheet}/values/{_range(args.dest_tab)}:clear", {})
 
     CHUNK = 500
     for i in range(0, len(out), CHUNK):
         chunk = out[i:i + CHUNK]
         sh._api("POST", f"{sh.SHEETS}/{args.sheet}/values:batchUpdate",
                 {"valueInputOption": "RAW",
-                 "data": [{"range": f"{args.dest_tab}!A{i+1}", "values": chunk}]})
+                 "data": [{"range": _range_body(args.dest_tab, f"A{i+1}"), "values": chunk}]})
 
     summary["mode"] = "written"
     print(json.dumps(summary, indent=2, ensure_ascii=False))
