@@ -76,7 +76,39 @@ new JSON in `presets/`.
 
 ## Notes
 - Models: `gpt-5-nano` (cheapest, default), `gpt-5-mini`, `gpt-4o-mini`. Full
-  agency list (~1,300 rows) ≈ **$0.08–0.09** on nano.
-- Calls are sequential — gentle on a fresh key's rate limits.
+  agency list (~1,300 rows) ≈ **$0.08–0.10** on nano.
+- `--concurrency 8` ≈ 8x faster (parallel + 429/5xx retries); `1` = sequential.
 - Always render first with `avenfield-browser-render` (use its unique sidecar
   tab so you personalize each site once), then map back here.
+
+## ✅ Proven runbook — RaiseView `ppr-002` (Goodfirms list, run 2026-06-16)
+
+End-to-end recipe that produced the live result. Reuse verbatim for the next
+agency list; swap the sheet ID / tab names.
+
+```bash
+S=~/.claude/skills/avenfield-sheets/sheets.py
+B=~/.claude/skills/avenfield-browser-render/render_column.py
+P=~/.claude/skills/avenfield-personalize/personalize.py
+SHEET="<spreadsheet URL or ID>"
+
+# 1. RENDER unique websites → sidecar tab, map markdown back, tidy the sheet
+python3 $B --sheet "$SHEET" --tab "Goodfirms-verified" --url-col H --start-row 2 \
+  --sidecar-tab "browser render" --map-col <markdown-col> --live --reset-row-height
+
+# 2. PERSONALIZE: estimate → test 15 → full run, then map service line into main
+python3 $P --sheet "$SHEET" --tab "browser render" --content-col F --key-col A \
+  --preset service_line --out-col G --estimate                      # ~$0.08, no API
+python3 $P ... --out-col G --test 20                                 # eyeball results
+python3 $P --sheet "$SHEET" --tab "browser render" --content-col F --key-col A \
+  --preset service_line --out-col G --run --concurrency 8 --status-cell K1 \
+  --map-tab "Goodfirms-verified" --map-key-col H --map-out-col J
+```
+
+Layout it assumes / produces:
+- **browser render** tab: `A` Website, `F` markdown, `G` service line, `H` sl_confidence, `K1` live status.
+- **Goodfirms-verified** (main): `H` Website, `J` service line (`{{serviceLine}}` for Instantly).
+
+Verified outcome (1,310 unique sites): 0 failures, **$0.0975**, 928 confident /
+382 low-confidence → `marketing`, mapped onto 2,349 contact rows, 0 blanks.
+`{{serviceLine}}` reads cleanly in the copy ("companies shopping for ___ help").
