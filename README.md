@@ -14,6 +14,7 @@ pipeline. You ask in plain English; Claude runs the skill.
 | `avenfield-instantly` | Drive Instantly v2 — list campaigns, add leads, push sequences, or any endpoint (generic passthrough) |
 | `avenfield-sheets` | Read/write any Google Sheet via the service-account JSON (share the sheet with the SA email) |
 | `avenfield-openai` | Full OpenAI access — raw passthrough to any /v1 endpoint + `chat` and `extract` (single + batch) |
+| `avenfield-personalize` | Generate cold-email merge variables ({{serviceLine}}…) from scraped website data — saved prompt presets, test-first, cost estimate before the full run, live progress, map back into the main sheet |
 
 Your existing copy/spintax/spamguard skills stay as-is — these complete the set.
 
