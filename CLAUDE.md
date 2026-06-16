@@ -46,6 +46,15 @@ push — don't leave it as a one-off script. The skills are the durable record o
 how we run campaigns; a fix that only lives in a chat is a fix that's lost next
 session.
 
+### Keep the campaign log updated
+There is a master **Campaign Log** sheet — `Avenfield — Campaign Log`:
+`https://docs.google.com/spreadsheets/d/1_ijH22NgrEM7SCeHpHwxlDeYnaaS0vSvkb6ZNOvvJYQ/edit`
+(tab `Campaigns`, columns: **Campaign Name | Leads Sheet Link | Copy Doc Link**).
+Whenever a new campaign is created from now on, **append a row to this log** with
+its name, leads-sheet link, and copy-doc link (leave a cell blank if a link
+doesn't exist yet, and fill it in later). Write via `avenfield-sheets` (the SA
+already has access). Keep it current — it's the single index of what we're running.
+
 ## The Skills (see README.md for full detail)
 - `avenfield-browser-render` — render / scrape / screenshot / extract any site (single, batch, or dedupe-column → sidecar tab → map back).
 - `avenfield-verify` — verify email deliverability (valid / catch-all / invalid / disposable / role).
