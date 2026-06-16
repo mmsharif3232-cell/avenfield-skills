@@ -205,6 +205,23 @@ def cmd_create(args):
                       "url": data.get("spreadsheetUrl")}, indent=2))
 
 
+def cmd_set_row_height(args):
+    """Reset/resize a tab's row heights (default 21px) — fixes rows blown up by big cells."""
+    sid = _sheet_id(args.sheet)
+    meta = _api("GET", f"{SHEETS}/{sid}?fields=sheets.properties")
+    prop = next((s["properties"] for s in meta.get("sheets", [])
+                 if s["properties"]["title"] == args.title), None)
+    if prop is None:
+        sys.exit(f"No tab named '{args.title}'.")
+    nrows = prop.get("gridProperties", {}).get("rowCount", 1000)
+    _api("POST", f"{SHEETS}/{sid}:batchUpdate", {"requests": [{
+        "updateDimensionProperties": {
+            "range": {"sheetId": prop["sheetId"], "dimension": "ROWS",
+                      "startIndex": 0, "endIndex": nrows},
+            "properties": {"pixelSize": args.pixels}, "fields": "pixelSize"}}]})
+    print(json.dumps({"tab": args.title, "rows": nrows, "pixelSize": args.pixels}))
+
+
 def main():
     ap = argparse.ArgumentParser(description="Google Sheets via service-account JSON.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -220,6 +237,9 @@ def main():
     p = ws(sub.add_parser("append")); p.add_argument("--range", required=True); p.add_argument("--values", required=True); p.set_defaults(fn=cmd_append)
     p = ws(sub.add_parser("add-tab")); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_add_tab)
     p = ws(sub.add_parser("delete-tab")); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_delete_tab)
+    p = ws(sub.add_parser("set-row-height")); p.add_argument("--title", required=True)
+    p.add_argument("--pixels", type=int, default=21, help="Row height in px (default 21 = Google default).")
+    p.set_defaults(fn=cmd_set_row_height)
     p = sub.add_parser("create"); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_create)
 
     args = ap.parse_args()

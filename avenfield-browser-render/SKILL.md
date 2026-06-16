@@ -113,6 +113,27 @@ Behaviour worth knowing:
 
 For one-off research ("what does this company do?"), a single `markdown` call is enough — read it and answer. For a pasted/CSV list (not a sheet), pipe it through `--batch` and read the JSONL.
 
+## ⭐⭐ Dedupe → sidecar tab → map back (lead lists with repeats)
+
+When a sheet has **many rows sharing the same Website** (multiple contacts per company), `render_column.py` renders each site **once**, writes a full sidecar tab, then maps the rendered field back onto every matching row — the exact flow used on the Goodfirms list (2,355 rows → 1,310 unique).
+
+```bash
+C=~/.claude/skills/avenfield-browser-render/render_column.py
+
+# Unique Websites (col H) → 'browser render' tab → markdown back into col K, live:
+python3 $C --sheet "<URL or ID>" --tab Goodfirms-verified --url-col H --start-row 2 \
+  --sidecar-tab "browser render" --map-col K --live --reset-row-height
+```
+
+- Dedupe normalizes scheme/`www`/trailing slash; `--no-dedupe` to render every row.
+- The sidecar tab gets `Website · ok · status · char_count · scrape_error · result`.
+- `--map-col` writes the rendered field onto rows that have a URL only (blank rows untouched) — point it at a column you're happy to overwrite.
+- `--live` streams rows + an `H1` ticker as they finish; `--reset-row-height` collapses the big markdown cells back to 21px.
+- `--dry-run` reports the unique count + a sample before spending any renders.
+
+> Heads-up after a big markdown write: the rows balloon. Reset them with
+> `--reset-row-height`, or any time via `avenfield-sheets/sheets.py set-row-height --sheet <ID> --title "<tab>"`.
+
 ## Notes
 - `markdown` is the default best choice for anything an LLM will read.
 - Pass timeouts/wait conditions in `--body` for slow or JS-heavy sites (`gotoOptions.waitUntil: "networkidle0"`).

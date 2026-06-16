@@ -27,6 +27,7 @@ python3 $S write  --sheet <ID> --range "leads!A1" --values '[["url","email"],["x
 python3 $S append --sheet <ID> --range "leads!A1" --values '[["y.com","b@y.com"]]'
 python3 $S add-tab    --sheet <ID> --title results
 python3 $S delete-tab --sheet <ID> --title scraped
+python3 $S set-row-height --sheet <ID> --title "browser render"   # back to 21px default
 python3 $S create --title "Leeds agencies — verified"    # SA owns it
 ```
 
