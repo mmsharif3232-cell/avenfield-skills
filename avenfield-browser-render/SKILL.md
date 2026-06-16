@@ -128,11 +128,12 @@ python3 $C --sheet "<URL or ID>" --tab Goodfirms-verified --url-col H --start-ro
 - Dedupe normalizes scheme/`www`/trailing slash; `--no-dedupe` to render every row.
 - The sidecar tab gets `Website · ok · status · char_count · scrape_error · result`.
 - `--map-col` writes the rendered field onto rows that have a URL only (blank rows untouched) — point it at a column you're happy to overwrite.
-- `--live` streams rows + an `H1` ticker as they finish; `--reset-row-height` collapses the big markdown cells back to 21px.
+- `--live` streams rows + an `H1` ticker as they finish; `--reset-row-height` tidies both tabs when done — rows back to 21px **and** wrap → CLIP so big markdown cells stay inside their own cell (no overflow). Add `--no-clip` to skip the CLIP part.
 - `--dry-run` reports the unique count + a sample before spending any renders.
 
-> Heads-up after a big markdown write: the rows balloon. Reset them with
-> `--reset-row-height`, or any time via `avenfield-sheets/sheets.py set-row-height --sheet <ID> --title "<tab>"`.
+> Heads-up after a big markdown write: rows balloon and text overflows. Use
+> `--reset-row-height` (rows→21px + wrap→CLIP), or fix either at any time via
+> `avenfield-sheets/sheets.py set-row-height …` and `… set-wrap … --strategy CLIP`.
 
 ## Notes
 - `markdown` is the default best choice for anything an LLM will read.

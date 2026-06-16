@@ -199,6 +199,23 @@ def cmd_delete_tab(args):
     print(json.dumps({"deleted": args.title}))
 
 
+def cmd_set_wrap(args):
+    """Set the wrap strategy for a whole tab — CLIP keeps each cell's text inside
+    its own cell (no overflow into neighbours); WRAP grows row height; OVERFLOW spills."""
+    sid = _sheet_id(args.sheet)
+    meta = _api("GET", f"{SHEETS}/{sid}?fields=sheets.properties")
+    prop = next((s["properties"] for s in meta.get("sheets", [])
+                 if s["properties"]["title"] == args.title), None)
+    if prop is None:
+        sys.exit(f"No tab named '{args.title}'.")
+    _api("POST", f"{SHEETS}/{sid}:batchUpdate", {"requests": [{
+        "repeatCell": {
+            "range": {"sheetId": prop["sheetId"]},
+            "cell": {"userEnteredFormat": {"wrapStrategy": args.strategy}},
+            "fields": "userEnteredFormat.wrapStrategy"}}]})
+    print(json.dumps({"tab": args.title, "wrapStrategy": args.strategy}))
+
+
 def cmd_create(args):
     data = _api("POST", SHEETS, {"properties": {"title": args.title}})
     print(json.dumps({"id": data.get("spreadsheetId"),
@@ -240,6 +257,9 @@ def main():
     p = ws(sub.add_parser("set-row-height")); p.add_argument("--title", required=True)
     p.add_argument("--pixels", type=int, default=21, help="Row height in px (default 21 = Google default).")
     p.set_defaults(fn=cmd_set_row_height)
+    p = ws(sub.add_parser("set-wrap")); p.add_argument("--title", required=True)
+    p.add_argument("--strategy", choices=["CLIP", "WRAP", "OVERFLOW_CELL"], default="CLIP")
+    p.set_defaults(fn=cmd_set_wrap)
     p = sub.add_parser("create"); p.add_argument("--title", required=True); p.set_defaults(fn=cmd_create)
 
     args = ap.parse_args()

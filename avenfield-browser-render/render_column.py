@@ -91,18 +91,26 @@ def _ensure_tab(sid, title):
                     {"requests": [{"addSheet": {"properties": {"title": title}}}]})
 
 
-def _reset_height(sid, title, px=21):
+def _tidy(sid, title, px=21, clip=True):
+    """Reset rows to default height and (optionally) set CLIP so big markdown
+    cells stay inside their own cell instead of overflowing / ballooning rows."""
     meta = sheets._api("GET", f"{sheets.SHEETS}/{sid}?fields=sheets.properties")
     prop = next((s["properties"] for s in meta.get("sheets", [])
                  if s["properties"]["title"] == title), None)
     if not prop:
         return
+    sheet_id = prop["sheetId"]
     nrows = prop.get("gridProperties", {}).get("rowCount", 1000)
-    sheets._api("POST", f"{sheets.SHEETS}/{sid}:batchUpdate", {"requests": [{
-        "updateDimensionProperties": {
-            "range": {"sheetId": prop["sheetId"], "dimension": "ROWS",
-                      "startIndex": 0, "endIndex": nrows},
-            "properties": {"pixelSize": px}, "fields": "pixelSize"}}]})
+    reqs = [{"updateDimensionProperties": {
+        "range": {"sheetId": sheet_id, "dimension": "ROWS",
+                  "startIndex": 0, "endIndex": nrows},
+        "properties": {"pixelSize": px}, "fields": "pixelSize"}}]
+    if clip:
+        reqs.append({"repeatCell": {
+            "range": {"sheetId": sheet_id},
+            "cell": {"userEnteredFormat": {"wrapStrategy": "CLIP"}},
+            "fields": "userEnteredFormat.wrapStrategy"}})
+    sheets._api("POST", f"{sheets.SHEETS}/{sid}:batchUpdate", {"requests": reqs})
 
 
 def main():
@@ -123,7 +131,10 @@ def main():
     ap.add_argument("--max-chars", type=int, default=45000)
     ap.add_argument("--live", action="store_true", help="Stream rows + a status ticker into the sidecar as they finish.")
     ap.add_argument("--flush-every", type=int, default=25)
-    ap.add_argument("--reset-row-height", action="store_true", help="Collapse source + sidecar rows to 21px when done.")
+    ap.add_argument("--reset-row-height", action="store_true",
+                    help="When done, tidy source + sidecar tabs: rows → 21px and wrap → CLIP (no overflow).")
+    ap.add_argument("--no-clip", action="store_true",
+                    help="With --reset-row-height, skip the CLIP wrap (only reset row height).")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -207,12 +218,13 @@ def main():
         _batch(sid, updates)
         print(f"mapped '{args.endpoint}' into {args.tab or '(first)'}!{mc} ({len(updates)} rows)")
 
-    # 4. tidy row heights
+    # 4. tidy: default row height + CLIP wrap (so big cells don't overflow/balloon)
     if args.reset_row_height:
-        _reset_height(sid, args.sidecar_tab)
+        clip = not args.no_clip
+        _tidy(sid, args.sidecar_tab, clip=clip)
         if args.tab:
-            _reset_height(sid, args.tab)
-        print("row heights reset to 21px")
+            _tidy(sid, args.tab, clip=clip)
+        print(f"tidied: rows→21px{' + wrap→CLIP' if clip else ''}")
 
 
 if __name__ == "__main__":
