@@ -212,6 +212,9 @@ def main():
     ap.add_argument("--low-conf-fallback", help='Override low-confidence fallback: a literal value or "most_common".')
     ap.add_argument("--spamguard", action="store_true", help="Inject deliverability rules into the prompt + clean banned words from outputs.")
     ap.add_argument("--no-spamguard", action="store_true", help="Disable spamguard even if the preset enables it.")
+    ap.add_argument("--no-retry", action="store_true", help="Don't auto-retry rows that hit an API error (default: retry them sequentially before any fallback).")
+    ap.add_argument("--filter-col", help="Only process rows where this column equals --filter-value (e.g. reprocess just confidence=low rows).")
+    ap.add_argument("--filter-value", help="Value --filter-col must equal (case-insensitive).")
     ap.add_argument("--test", type=int, default=15, help="Rows to process in TEST mode (default 15).")
     ap.add_argument("--run", action="store_true", help="Process the WHOLE sheet (not just --test).")
     ap.add_argument("--estimate", action="store_true", help="Print a no-API cost estimate and exit.")
@@ -270,12 +273,22 @@ def main():
     key_vals = _get(sid, a1(args.tab, args.key_col.strip().upper(), args.start_row)
                     + f":{args.key_col.strip().upper()}") if args.key_col else []
     empty_default = args.default if args.default is not None else cfg.get("empty_default")
+    # optional filter: only reprocess rows whose --filter-col equals --filter-value
+    filt_vals = []
+    if args.filter_col:
+        fc = args.filter_col.strip().upper()
+        filt_vals = _get(sid, a1(args.tab, fc, args.start_row) + f":{fc}")
+    fval = (args.filter_value or "").strip().lower()
     # include empty-content rows when we have any way to fill them (a default,
     # or the low-confidence fallback) so the sheet ends up complete.
     include_empty = (empty_default is not None) or bool(conf_var and fb_spec)
     jobs = []  # (row_no, key, content)  — content None means "empty source, no API call"
     span = max(len(content_vals), len(key_vals))
     for i in range(span):
+        if args.filter_col:
+            cell_v = (filt_vals[i][0].strip().lower() if i < len(filt_vals) and filt_vals[i] else "")
+            if cell_v != fval:
+                continue
         c = content_vals[i][0] if (i < len(content_vals) and content_vals[i]) else ""
         key = key_vals[i][0] if (i < len(key_vals) and key_vals[i]) else ""
         if c and c.strip():
@@ -307,10 +320,25 @@ def main():
 
     results = {}      # key -> {var: value}
     rows_data = []    # [{row, key, **vars}] — kept so we can apply the fallback pass
+    row_index = {}    # row_no -> index in rows_data
+    failed = []       # row_nos that hit an API error (retried before any fallback)
     pt = ct = done = 0
-    fail = spam_cleaned = 0
+    fail = spam_cleaned = recovered = 0
     pending = []
     start = time.time()
+    job_by_row = {j[0]: j for j in todo}
+
+    def scrub(row_res):
+        nonlocal spam_cleaned
+        if not spam_on:
+            return
+        for nm in names:
+            if nm == conf_var:
+                continue
+            cleaned = spam_clean(row_res.get(nm))
+            if cleaned != row_res.get(nm):
+                row_res[nm] = cleaned
+                spam_cleaned += 1
 
     def flush():
         nonlocal pending
@@ -339,21 +367,16 @@ def main():
                 usage.get("completion_tokens", 0), ok)
 
     def absorb(row_no, key, row_res, p, c, ok):
-        nonlocal pt, ct, done, fail, spam_cleaned
+        nonlocal pt, ct, done, fail
         pt += p
         ct += c
         done += 1
         if not ok:
             fail += 1
-        if spam_on:                               # safety net: scrub any banned word
-            for nm in names:
-                if nm == conf_var:
-                    continue
-                cleaned = spam_clean(row_res.get(nm))
-                if cleaned != row_res.get(nm):
-                    row_res[nm] = cleaned
-                    spam_cleaned += 1
+            failed.append(row_no)
+        scrub(row_res)                            # safety net: scrub any banned word
         vals = [row_res[nm] for nm in names]
+        row_index[row_no] = len(rows_data)
         rows_data.append({"row": row_no, "key": key, **row_res})
         if key:
             results[norm_url(key)] = dict(row_res)
@@ -380,6 +403,30 @@ def main():
                 absorb(*fut.result())
 
     flush()
+
+    # --- auto-retry rows that hit an API error (sequential + gentle) so a rate-limit
+    #     blip never silently becomes the fallback. Runs BEFORE the fallback pass. ---
+    if failed and not args.no_retry:
+        print(f"retrying {len(failed)} failed row(s) sequentially...", file=sys.stderr)
+        retry_fix = []
+        for rn in list(failed):
+            job = job_by_row.get(rn)
+            if not job:
+                continue
+            rno, key, rr, p, c, ok = work(job)
+            pt += p
+            ct += c
+            if ok:
+                recovered += 1
+                fail -= 1
+            scrub(rr)
+            rows_data[row_index[rno]] = {"row": rno, "key": key, **rr}
+            if key:
+                results[norm_url(key)] = dict(rr)
+            for j, v in enumerate([rr[nm] for nm in names]):
+                retry_fix.append({"range": a1(args.tab, idx_to_col(out0 + j), rno),
+                                  "values": [[v]]})
+        _batch(sid, retry_fix)
 
     # --- low-confidence fallback pass: replace unsure/empty guesses with a safe value ---
     low_n = 0
@@ -414,6 +461,9 @@ def main():
     summary = {"mode": mode, "rows": done, "failed": fail, "model": model,
                "prompt_tokens": pt, "completion_tokens": ct,
                "cost_usd": round(actual, 4), "price_per_1M": [disp_in, disp_out]}
+    if failed:
+        summary["api_failures"] = len(failed)
+        summary["recovered_on_retry"] = recovered
     if spam_on:
         summary["spamguard"] = True
         summary["spam_cleaned"] = spam_cleaned

@@ -76,6 +76,16 @@ Override any field per-run with `--prompt-file`, `--vars`, `--model`,
 `--reasoning-effort`, `--max-chars`, `--default`. Add new campaigns by dropping a
 new JSON in `presets/`.
 
+## Never leaves failures behind
+- **Auto-retry.** Any row that hits an API error (e.g. a rate-limit blip at high
+  `--concurrency`) is collected and **retried sequentially before the fallback
+  runs** — so a transient failure never silently becomes the fallback value. The
+  summary reports `api_failures` + `recovered_on_retry`. Disable with `--no-retry`.
+- **Reprocess a subset.** `--filter-col COL --filter-value V` processes only rows
+  whose column equals V — e.g. re-run just the unsure ones to recover specifics:
+  `--filter-col H --filter-value low` (H = the confidence column). Pair with a
+  lower `--concurrency` to avoid new rate limits.
+
 ## Deliverability (spamguard built in)
 When the preset sets `"spamguard": true` (or you pass `--spamguard`), personalize
 pulls `avenfield-spamguard`'s banned-word list and:
