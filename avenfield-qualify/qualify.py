@@ -186,12 +186,28 @@ def cmd_extract(args):
         return
 
     # 3. write to dest tab (create if missing, else clear first)
-    tabs = sh._api("GET", f"{sh.SHEETS}/{args.sheet}", None).get("sheets", [])
-    titles = {t["properties"]["title"] for t in tabs}
+    # Ensure the tab has enough rows for our data
+    needed_rows = max(len(out) + 10, 100)
+    tabs_meta = sh._api("GET", f"{sh.SHEETS}/{args.sheet}", None).get("sheets", [])
+    titles = {t["properties"]["title"]: t["properties"] for t in tabs_meta}
     if args.dest_tab not in titles:
-        sh._api("POST", f"{sh.SHEETS}/{args.sheet}:batchUpdate",
-                {"requests": [{"addSheet": {"properties": {"title": args.dest_tab}}}]})
+        sh._api("POST", f"{sh.SHEETS}/{args.sheet}:batchUpdate", {"requests": [
+            {"addSheet": {"properties": {"title": args.dest_tab,
+                                         "gridProperties": {"rowCount": needed_rows,
+                                                            "columnCount": 26}}}}
+        ]})
     else:
+        # Expand row count if needed
+        props = titles[args.dest_tab]
+        sid = props["sheetId"]
+        cur_rows = props.get("gridProperties", {}).get("rowCount", 1000)
+        if cur_rows < needed_rows:
+            sh._api("POST", f"{sh.SHEETS}/{args.sheet}:batchUpdate", {"requests": [
+                {"updateSheetProperties": {
+                    "properties": {"sheetId": sid,
+                                   "gridProperties": {"rowCount": needed_rows}},
+                    "fields": "gridProperties.rowCount"}}
+            ]})
         sh._api("POST", f"{sh.SHEETS}/{args.sheet}/values/{args.dest_tab}!A1:ZZ:clear", {})
 
     CHUNK = 500
