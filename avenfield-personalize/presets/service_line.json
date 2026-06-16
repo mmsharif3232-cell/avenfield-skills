@@ -24,7 +24,7 @@
     "low"
   ],
   "low_conf_fallback_var": "service_line",
-  "low_conf_fallback": "most_common",
+  "low_conf_fallback": "marketing",
   "generic_fallback": "marketing",
   "empty_default": "marketing"
 }
