@@ -107,6 +107,12 @@ def main():
     ap.add_argument("--max-chars", type=int, default=45000, help="Truncate each cell to N chars.")
     ap.add_argument("--out-header", help="Write this header above the output column (needs --start-row > 1).")
     ap.add_argument("--dry-run", action="store_true", help="Render but DON'T write; print a preview.")
+    ap.add_argument("--live", action="store_true",
+                    help="Flush results to the sheet as they complete (watch it fill row-by-row).")
+    ap.add_argument("--flush-every", type=int, default=25,
+                    help="In --live mode, push to the sheet every N completed renders (default 25).")
+    ap.add_argument("--status-cell",
+                    help="In --live mode, write progress/rate to this cell (e.g. H1) in the same tab.")
     args = ap.parse_args()
 
     try:
@@ -141,6 +147,43 @@ def main():
         if len(res) > args.max_chars:
             res = res[:args.max_chars] + "\n…[truncated]"
         return row_no, url, ok, status, res
+
+    # --- LIVE mode: stream results into the sheet as they finish ---------
+    if args.live and not args.dry_run:
+        import time
+        from concurrent.futures import as_completed
+
+        def push(cells):
+            if cells:
+                sheets._api("POST", f"{sheets.SHEETS}/{sid}/values:batchUpdate",
+                            {"valueInputOption": "RAW", "data": cells})
+
+        if args.out_header and args.start_row > 1:
+            push([{"range": a1(args.tab, out_col, args.start_row - 1),
+                   "values": [[args.out_header]]}])
+
+        pending, done, ok_n, start = [], 0, 0, time.time()
+        with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
+            for fut in as_completed([ex.submit(render_job, j) for j in jobs]):
+                row_no, url, ok, status, res = fut.result()
+                ok_n += 1 if ok else 0
+                done += 1
+                pending.append({"range": a1(args.tab, out_col, row_no), "values": [[res]]})
+                if len(pending) >= max(1, args.flush_every):
+                    push(pending)
+                    pending = []
+                    if args.status_cell:
+                        rate = done / max(1, time.time() - start) * 60
+                        push([{"range": a1(args.tab, args.status_cell.rstrip("0123456789"),
+                                           int("".join(filter(str.isdigit, args.status_cell)))),
+                               "values": [[f"{done}/{len(jobs)} done · ok={ok_n} · "
+                                           f"{rate:.0f}/min"]]}])
+            push(pending)
+        summary = {"sheet": sid, "tab": args.tab or "(first)", "url_col": url_col,
+                   "out_col": out_col, "rendered": done, "ok": ok_n,
+                   "failed": done - ok_n, "endpoint": args.endpoint, "live": True}
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return
 
     results = []
     with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:

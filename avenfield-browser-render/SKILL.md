@@ -90,7 +90,17 @@ python3 $R --sheet <ID> --url-col A --start-row 2 --endpoint json \
 
 # Preview first — render but DON'T write, see the first 5 rows:
 python3 $R --sheet <ID> --url-col A --start-row 2 --dry-run
+
+# LIVE — watch the sheet fill row-by-row, with a running count/rate in H1:
+python3 $R --sheet <ID> --url-col A --start-row 2 \
+  --live --flush-every 25 --status-cell H1
 ```
+
+**Live mode** (`--live`): instead of writing once at the end, results are flushed
+to the output column every `--flush-every` completions (default 25) as renders
+finish — so a big run visibly fills in real time. `--status-cell H1` writes a
+`"850/1310 done · ok=817 · 105/min"` ticker to that cell so you can watch speed
+and ETA. Use it for any run big enough that you'd want to see progress.
 
 Behaviour worth knowing:
 - `--out-col` defaults to the column right of `--url-col`. Point it at an EMPTY column so nothing is overwritten — writes are surgical (only the cells we computed).
