@@ -4,10 +4,18 @@ credentials.env
 *.env
 !*.env.template
 
-# Google service-account JSON / any credential json
+# Google service-account JSON / any credential json or key material
 *service-account*.json
 *credentials*.json
 *-key.json
+google-sa.json
+*-sa.json
+*_sa.json
+*sa.json
+*.pem
+*.key
+secrets/
+.avenfield/
 
 # Python
 __pycache__/
