@@ -40,8 +40,9 @@ python3 $P --sheet "<ID>" --tab "browser render" --content-col F --key-col A \
   --preset service_line --out-col G --test 15
 
 # 3) FULL run + map the service line into the main tab (matched by website)
+#    --concurrency 8 ≈ 8x faster (parallel calls, with 429/5xx retries); 1 = sequential
 python3 $P --sheet "<ID>" --tab "browser render" --content-col F --key-col A \
-  --preset service_line --out-col G --run --status-cell I1 \
+  --preset service_line --out-col G --run --concurrency 8 --status-cell K1 \
   --map-tab "Goodfirms-verified" --map-key-col H --map-out-col J
 ```
 

@@ -125,8 +125,11 @@ def _batch(sid, data):
                     {"valueInputOption": "RAW", "data": data})
 
 
-def extract_one(content, schema, model, prompt, extra):
-    """Strict-JSON extraction that also returns token usage. (status, result, usage)"""
+def extract_one(content, schema, model, prompt, extra, retries=3):
+    """Strict-JSON extraction that also returns token usage. (status, result, usage).
+
+    Retries transient 429/5xx with backoff so concurrent runs don't mark a
+    rate-limited row as a failure (which would trigger the low-confidence fallback)."""
     body = {
         "model": model,
         "messages": [{"role": "system", "content": prompt},
@@ -135,14 +138,17 @@ def extract_one(content, schema, model, prompt, extra):
             "name": "personalize", "strict": True, "schema": schema}},
     }
     body.update(extra)
-    status, data = ai.call("/chat/completions", body=body)
-    if status != 200:
+    for attempt in range(retries + 1):
+        status, data = ai.call("/chat/completions", body=body)
+        if status == 200:
+            try:
+                return status, json.loads(data["choices"][0]["message"]["content"]), data.get("usage", {})
+            except Exception:
+                return status, {"_error": "unparseable"}, data.get("usage", {})
+        if status in (429, 500, 502, 503, 504) and attempt < retries:
+            time.sleep(1.5 * (attempt + 1))
+            continue
         return status, {"_error": data}, {}
-    try:
-        result = json.loads(data["choices"][0]["message"]["content"])
-    except Exception:
-        result = {"_error": "unparseable"}
-    return status, result, data.get("usage", {})
 
 
 def cost_of(model, pin, pout, prompt_tok, comp_tok):
@@ -171,6 +177,8 @@ def main():
     ap.add_argument("--run", action="store_true", help="Process the WHOLE sheet (not just --test).")
     ap.add_argument("--estimate", action="store_true", help="Print a no-API cost estimate and exit.")
     ap.add_argument("--flush-every", type=int, default=25)
+    ap.add_argument("--concurrency", type=int, default=1,
+                    help="Parallel API calls (default 1 = sequential). 8 is ~8x faster and still gentle.")
     ap.add_argument("--status-cell", help="Cell to write live progress/cost into (e.g. I1).")
     ap.add_argument("--price-in", type=float, help="Override input $/1M tokens.")
     ap.add_argument("--price-out", type=float, help="Override output $/1M tokens.")
@@ -265,28 +273,34 @@ def main():
         _batch(sid, pending)
         pending = []
 
-    for row_no, key, content in todo:
+    def work(job):
+        """Render one row → (row_no, key, row_res, prompt_tok, comp_tok, ok). Thread-safe."""
+        row_no, key, content = job
         if content is None:                       # empty source → mark low, no API call
-            row_res = {nm: "" for nm in names}
+            rr = {nm: "" for nm in names}
             if conf_var:
-                row_res[conf_var] = low_vals[0]
-            done += 1
-        else:
-            status, res, usage = extract_one(content, schema, model, prompt, extra)
-            pt += usage.get("prompt_tokens", 0)
-            ct += usage.get("completion_tokens", 0)
-            done += 1
-            ok = "_error" not in res
-            if not ok:
-                fail += 1
-            row_res = {}
-            for nm in names:
-                v = res.get(nm, "") if ok else ""
-                if normalize and isinstance(v, str):
-                    v = normalize_case(v)
-                row_res[nm] = v
-            if not ok and conf_var:               # API failure → treat as low confidence
-                row_res[conf_var] = low_vals[0]
+                rr[conf_var] = low_vals[0]
+            return row_no, key, rr, 0, 0, True
+        status, res, usage = extract_one(content, schema, model, prompt, extra)
+        ok = "_error" not in res
+        rr = {}
+        for nm in names:
+            v = res.get(nm, "") if ok else ""
+            if normalize and isinstance(v, str):
+                v = normalize_case(v)
+            rr[nm] = v
+        if not ok and conf_var:                   # API failure → treat as low confidence
+            rr[conf_var] = low_vals[0]
+        return (row_no, key, rr, usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0), ok)
+
+    def absorb(row_no, key, row_res, p, c, ok):
+        nonlocal pt, ct, done, fail
+        pt += p
+        ct += c
+        done += 1
+        if not ok:
+            fail += 1
         vals = [row_res[nm] for nm in names]
         rows_data.append({"row": row_no, "key": key, **row_res})
         if key:
@@ -302,6 +316,16 @@ def main():
                 cost = cost_of(model, pin, pout, pt, ct)
                 _put(sid, a1(args.tab, *re.match(r"([A-Za-z]+)(\d+)", args.status_cell).groups()),
                      [[f"{done}/{n} · ${cost:.4f} · {done/max(1,time.time()-start)*60:.0f}/min"]])
+
+    conc = max(1, args.concurrency)
+    if conc == 1:
+        for job in todo:
+            absorb(*work(job))
+    else:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=conc) as ex:
+            for fut in as_completed([ex.submit(work, j) for j in todo]):
+                absorb(*fut.result())
 
     flush()
 
