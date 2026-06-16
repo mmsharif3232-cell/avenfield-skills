@@ -81,6 +81,27 @@ def resolve_col(spec: str, headers: list[str]) -> int:
     raise SystemExit(f"Column {spec!r} not found. Headers: {headers}")
 
 
+def _tidy_tab(sheet_id: str, tab_title: str, px: int = 21) -> None:
+    """Set row height to px and wrap strategy to CLIP on a tab — keeps long markdown readable."""
+    meta = sh._api("GET", f"{sh.SHEETS}/{sheet_id}?fields=sheets.properties", None)
+    prop = next((s["properties"] for s in meta.get("sheets", [])
+                 if s["properties"]["title"] == tab_title), None)
+    if prop is None:
+        return
+    sid = prop["sheetId"]
+    nrows = prop.get("gridProperties", {}).get("rowCount", 1000)
+    sh._api("POST", f"{sh.SHEETS}/{sheet_id}:batchUpdate", {"requests": [
+        {"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "ROWS",
+                      "startIndex": 0, "endIndex": nrows},
+            "properties": {"pixelSize": px}, "fields": "pixelSize"}},
+        {"repeatCell": {
+            "range": {"sheetId": sid},
+            "cell": {"userEnteredFormat": {"wrapStrategy": "CLIP"}},
+            "fields": "userEnteredFormat.wrapStrategy"}},
+    ]})
+
+
 def _range(tab: str, cells: str = "A1:ZZ") -> str:
     """Build a Sheets API range string, URL-encoding the tab name for path use."""
     import urllib.parse
@@ -227,6 +248,9 @@ def cmd_extract(args):
         sh._api("POST", f"{sh.SHEETS}/{args.sheet}/values:batchUpdate",
                 {"valueInputOption": "RAW",
                  "data": [{"range": _range_body(args.dest_tab, f"A{i+1}"), "values": chunk}]})
+
+    # Tidy the dest tab: 21px rows + CLIP wrap (long markdown stays in its cell)
+    _tidy_tab(args.sheet, args.dest_tab)
 
     summary["mode"] = "written"
     print(json.dumps(summary, indent=2, ensure_ascii=False))

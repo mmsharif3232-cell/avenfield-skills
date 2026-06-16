@@ -81,6 +81,7 @@ python3 $Q extract --sheet <ID> \
 - `--min-confidence high|medium|low` filters by the confidence column.
 - Columns accept a **letter** (`E`) or a **header name** (`website`).
 - Dest tab is created if missing, else cleared and rewritten (idempotent).
+- After writing, automatically sets all rows to **21px height** and **CLIP wrap** so long markdown stays inside its cell and the sheet stays readable.
 - Prints `{qualified_unique_sites, sites_with_lead_rows, qualified_lead_rows}`.
 
 ## Hard-won lessons (baked in)
