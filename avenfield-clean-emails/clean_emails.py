@@ -270,6 +270,60 @@ def read_tab(sheet_id: str, tab: str) -> list[list[str]]:
     return raw.get("values", [])
 
 
+# ── sheet write helpers ───────────────────────────────────────────────────────
+def _tidy_tab(sheet_id: str, tab_title: str, px: int = 21) -> None:
+    """Set row height to px and wrap strategy to CLIP."""
+    meta = sh._api("GET", f"{sh.SHEETS}/{sheet_id}?fields=sheets.properties", None)
+    prop = next((s["properties"] for s in meta.get("sheets", [])
+                 if s["properties"]["title"] == tab_title), None)
+    if prop is None:
+        return
+    sid = prop["sheetId"]
+    nrows = prop.get("gridProperties", {}).get("rowCount", 1000)
+    sh._api("POST", f"{sh.SHEETS}/{sheet_id}:batchUpdate", {"requests": [
+        {"updateDimensionProperties": {
+            "range": {"sheetId": sid, "dimension": "ROWS",
+                      "startIndex": 0, "endIndex": nrows},
+            "properties": {"pixelSize": px}, "fields": "pixelSize"}},
+        {"repeatCell": {
+            "range": {"sheetId": sid},
+            "cell": {"userEnteredFormat": {"wrapStrategy": "CLIP"}},
+            "fields": "userEnteredFormat.wrapStrategy"}},
+    ]})
+
+
+def _write_tab(sheet_id: str, dest_tab: str, rows: list[list], chunk: int = 500) -> None:
+    """Create-or-clear dest_tab and write rows in chunks."""
+    needed = max(len(rows) + 20, 200)
+    tabs_meta = sh._api("GET", f"{sh.SHEETS}/{sheet_id}", None).get("sheets", [])
+    titles = {t["properties"]["title"]: t["properties"] for t in tabs_meta}
+    if dest_tab not in titles:
+        sh._api("POST", f"{sh.SHEETS}/{sheet_id}:batchUpdate", {"requests": [
+            {"addSheet": {"properties": {
+                "title": dest_tab,
+                "gridProperties": {"rowCount": needed, "columnCount": 26},
+            }}}
+        ]})
+    else:
+        props = titles[dest_tab]
+        sid = props["sheetId"]
+        if props.get("gridProperties", {}).get("rowCount", 0) < needed:
+            sh._api("POST", f"{sh.SHEETS}/{sheet_id}:batchUpdate", {"requests": [
+                {"updateSheetProperties": {
+                    "properties": {"sheetId": sid,
+                                   "gridProperties": {"rowCount": needed}},
+                    "fields": "gridProperties.rowCount"}}
+            ]})
+        sh._api("POST", f"{sh.SHEETS}/{sheet_id}/values/{_range(dest_tab, 'A1:ZZ')}:clear", {})
+
+    for i in range(0, len(rows), chunk):
+        sl = rows[i:i + chunk]
+        sh._api("POST", f"{sh.SHEETS}/{sheet_id}/values:batchUpdate", {
+            "valueInputOption": "RAW",
+            "data": [{"range": _range_body(dest_tab, f"A{i + 1}"), "values": sl}],
+        })
+
+
 # ── commands ──────────────────────────────────────────────────────────────────
 SELF_TEST_SAMPLE = [
     ("%20info@flahvac.com", "info@flahvac.com", "cleaned"),
@@ -374,22 +428,116 @@ def cmd_clean(args):
           + (f", status -> col {idx_to_col(status_i)}" if status_i is not None else ""))
 
 
+def cmd_extract(args):
+    """Clean + filter (valid emails only) + deduplicate by email → new tab."""
+    sheet_id = sh._sheet_id(args.sheet)
+    print(f"Reading {args.tab!r}…", flush=True)
+    rows = read_tab(sheet_id, args.tab)
+    if not rows:
+        raise SystemExit(f"Tab {args.tab!r} is empty.")
+    hdr = rows[0]
+    email_i = resolve_col(args.email_col, hdr)
+
+    stats: dict[str, int] = {
+        "total_rows": len(rows) - 1,
+        "had_email": 0,
+        "unchanged": 0,
+        "cleaned": 0,
+        "dropped_placeholder": 0,
+        "dropped_supplier": 0,
+        "dropped_invalid": 0,
+        "dropped_empty": 0,
+        "dropped_duplicate": 0,
+        "written": 0,
+    }
+    seen: set[str] = set()
+    out_hdr = list(hdr) + ["email_clean_status"]
+    out: list[list] = [out_hdr]
+    samples: list[tuple[str, str, str]] = []
+
+    for r in rows[1:]:
+        raw = r[email_i] if len(r) > email_i else ""
+        if raw.strip():
+            stats["had_email"] += 1
+
+        cleaned, status = clean_email(raw)
+
+        if not cleaned:
+            stats[f"dropped_{status}"] = stats.get(f"dropped_{status}", 0) + 1
+            continue
+
+        key = cleaned.lower()
+        if key in seen:
+            stats["dropped_duplicate"] += 1
+            continue
+        seen.add(key)
+
+        stats[status] = stats.get(status, 0) + 1
+        if status == "cleaned" and len(samples) < 20:
+            samples.append((raw, cleaned, status))
+
+        padded = list(r) + [""] * max(0, len(hdr) - len(r))
+        padded[email_i] = cleaned
+        padded.append(status)
+        out.append(padded)
+        stats["written"] += 1
+
+    print(json.dumps(stats, indent=2, ensure_ascii=False))
+    if samples:
+        print("\nsample cleaned (raw -> cleaned):")
+        for raw, cleaned, status in samples[:10]:
+            print(f"  {raw!r:55} -> {cleaned!r}")
+
+    if args.dry_run:
+        print("\n(dry-run — nothing written)")
+        if len(out) > 1:
+            print("\nsample output rows:")
+            for r in out[1:4]:
+                print(" ", r)
+        return
+
+    print(f"\nWriting {stats['written']} rows to {args.dest_tab!r}…", flush=True)
+    _write_tab(sheet_id, args.dest_tab, out, chunk=args.chunk)
+    print("Tidying tab…", flush=True)
+    _tidy_tab(sheet_id, args.dest_tab)
+    print(f"Done. {stats['written']} rows in {args.dest_tab!r}.")
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Deterministically clean a scraped email column in a Google Sheet.")
-    ap.add_argument("--self-test", action="store_true", help="run the built-in cleaner test cases and exit")
-    ap.add_argument("--sheet", help="sheet URL or ID")
-    ap.add_argument("--tab", help="tab name")
-    ap.add_argument("--email-col", help="email column letter (K) or header name")
-    ap.add_argument("--status-col", help="optional status column letter or header name")
-    ap.add_argument("--chunk", type=int, default=500)
-    ap.add_argument("--dry-run", action="store_true", help="report only, write nothing")
+    ap = argparse.ArgumentParser(description="Deterministically clean a scraped email column.")
+    ap.add_argument("--self-test", action="store_true", help="run built-in test cases and exit")
+
+    sub = ap.add_subparsers(dest="cmd")
+
+    c = sub.add_parser("clean", help="clean email col in-place + optional status col")
+    c.add_argument("--sheet", required=True)
+    c.add_argument("--tab", required=True)
+    c.add_argument("--email-col", required=True, help="column letter or header name")
+    c.add_argument("--status-col", help="optional status column letter or header name")
+    c.add_argument("--chunk", type=int, default=500)
+    c.add_argument("--dry-run", action="store_true")
+    c.set_defaults(func=cmd_clean)
+
+    e = sub.add_parser("extract", help="clean + filter + dedup → write to dest tab")
+    e.add_argument("--sheet", required=True)
+    e.add_argument("--tab", required=True)
+    e.add_argument("--email-col", required=True, help="column letter or header name")
+    e.add_argument("--dest-tab", required=True, help="destination tab name")
+    e.add_argument("--chunk", type=int, default=500)
+    e.add_argument("--dry-run", action="store_true")
+    e.set_defaults(func=cmd_extract)
+
     args = ap.parse_args()
 
     if args.self_test:
         cmd_self_test(args)
-    if not (args.sheet and args.tab and args.email_col):
-        ap.error("--sheet, --tab and --email-col are required (unless --self-test)")
-    cmd_clean(args)
+        return
+
+    if not args.cmd:
+        ap.print_help()
+        sys.exit(1)
+
+    args.func(args)
 
 
 if __name__ == "__main__":

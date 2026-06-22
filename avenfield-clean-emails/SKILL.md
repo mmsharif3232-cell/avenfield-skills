@@ -17,28 +17,42 @@ flagged**, never guessed. Better an empty cell than a wrong send.
 Run this BEFORE verifying — verifying junk wastes credits, and a `%20info@…`
 address fails verification even though the real address is fine.
 
-## Run it
+## Commands
+
+### `clean` — in-place: clean the email column and write a status column
 
 ```bash
 E=~/.claude/skills/avenfield-clean-emails/clean_emails.py
 
-# 1. Dry-run: status breakdown + 20 sample changes, writes nothing
-python3 $E --sheet "<URL|ID>" --tab "Test to find more Emails" \
-    --email-col K --status-col L --dry-run
+# Dry-run: status breakdown + 20 sample changes, writes nothing
+python3 $E clean --sheet "<URL|ID>" --tab "Main" \
+    --email-col L --status-col N --dry-run
 
-# 2. Full run: clean col K in place, status into col L
-python3 $E --sheet "<URL|ID>" --tab "Test to find more Emails" \
-    --email-col K --status-col L
+# Full run: clean col L in-place, status into col N
+python3 $E clean --sheet "<URL|ID>" --tab "Main" \
+    --email-col L --status-col N
 
 # Sanity-check the cleaner itself (no sheet needed)
 python3 $E --self-test
 ```
 
-- `--email-col` / `--status-col` accept a column **letter** (`K`) or a **header name** (`email`).
-- `--status-col` is optional — omit it to only rewrite the email column.
+### `extract` — clean + filter (valid only) + deduplicate → new tab
+
+```bash
+# Preview counts, write nothing
+python3 $E extract --sheet "<URL|ID>" --tab "Main" \
+    --email-col L --dest-tab clean_emails --dry-run
+
+# Full run: writes clean_emails tab with all original columns + email_clean_status
+python3 $E extract --sheet "<URL|ID>" --tab "Main" \
+    --email-col L --dest-tab clean_emails
+```
+
+- `--email-col` accepts a column **letter** (`L`) or a **header name** (`email`).
+- `--status-col` (clean command) is optional — omit to only rewrite the email column.
 - `--dry-run` reports and writes nothing. **Always dry-run first** on a real list.
 - `--chunk` (default 500) controls write batch size.
-- **Idempotent:** a cell already equal to its cleaned value comes back `unchanged`; re-running is safe.
+- **Idempotent:** re-running `extract` clears + rewrites the dest tab; re-running `clean` on already-clean values returns `unchanged`.
 
 ## The cleaning algorithm (in order)
 1. **URL-decode** twice (`%20`→space, `%28`→`(`, `%22`→`"`, `%e2%80%8d`→ZWJ; twice catches `%2520` double-encoding).
