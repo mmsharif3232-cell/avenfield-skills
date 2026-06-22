@@ -58,6 +58,7 @@ already has access). Keep it current — it's the single index of what we're run
 ## The Skills (see README.md for full detail)
 - `avenfield-browser-render` — render / scrape / screenshot / extract any site (single, batch, or dedupe-column → sidecar tab → map back).
 - `avenfield-verify` — verify email deliverability (valid / catch-all / invalid / disposable / role).
+- `avenfield-clean-emails` — deterministically clean a scraped email column (URL-decode `%20`, strip zero-width/underscore/dash prefixes, unglue markdown/phone, repair doubled TLDs, block placeholder/supplier/gateway domains) + per-row status. Run BEFORE `avenfield-verify`.
 - `avenfield-instantly` — drive Instantly v2 (campaigns, leads incl. bulk push-leads, sequences, generic passthrough).
 - `avenfield-instantly-upload` — upload a sheet of leads into a campaign (column→field/var mapping, test-first, idempotent, never launches).
 - `avenfield-sheets` — read/write any Google Sheet via the service account (incl. create/share/row-height/wrap).
