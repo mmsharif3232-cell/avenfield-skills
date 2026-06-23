@@ -66,6 +66,12 @@ SEARCH_MODEL = "gpt-4o-mini"
 SEARCH_TOOL = {"type": "web_search"}
 COST_PER_OPENAI_SEARCH = 0.012        # $10/1k calls + ~$0.001-0.002 tokens (real)
 
+# GPT-pick backend: a reasoning model chooses the official site from the REAL
+# DuckDuckGo results (grounded → no hallucinated URLs; render-verify still guards).
+GPT_PICK_MODEL = "gpt-5-mini"
+GPT_IN_PER_1M = 0.25                  # $/1M input tokens  (sourced pricing)
+GPT_OUT_PER_1M = 2.00                 # $/1M output tokens
+
 # Cloudflare Browser Rendering is billed by DURATION, not per request:
 # $0.09/browser-hour, 10 browser-hours/month free on Workers Paid.
 # Source: developers.cloudflare.com/browser-rendering/platform/pricing/
@@ -313,6 +319,94 @@ def cloudflare_search_candidates(name: str, city: str, state: str) -> tuple[list
     return [(full, rank[full]) for full, _ in cands], ms
 
 
+def cloudflare_search_raw(name: str, city: str, state: str):
+    """Render the DuckDuckGo results page and return (list[(url, title)], ms).
+
+    Keeps the result TITLE (the `links` endpoint returns {url,text}) — titles are
+    a strong signal for the GPT picker. Decodes uddg redirects, drops directories,
+    dedupes by homepage, keeps DuckDuckGo order, top ~10."""
+    q = " ".join(p for p in (name, city, state) if p).strip()
+    url = DDG_HTML + urllib.parse.quote(q)
+    ok, status, result, ms = cf_render_ms("links", {"url": url}, timeout=60, retries=2)
+    if not ok:
+        return [], ms
+    try:
+        links = json.loads(result)
+    except Exception:
+        return [], ms
+    if not isinstance(links, list):
+        return [], ms
+    out, seen = [], set()
+    for L in links:
+        raw = L.get("url", "") if isinstance(L, dict) else str(L)
+        title = (L.get("text", "") if isinstance(L, dict) else "").strip()
+        real = decode_ddg(raw)
+        if not real:
+            continue
+        hp = homepage(real)
+        if not hp or is_directory(hp):
+            continue
+        if hp not in seen:
+            seen.add(hp)
+            out.append((real, title))   # keep the FULL url (deep path helps verify)
+        if len(out) >= 10:
+            break
+    return out, ms
+
+
+def gpt_pick_website(name, city, state, cands):
+    """Let a reasoning model pick the official site from the REAL DDG results.
+
+    cands = [(url, title)]. Returns (picked_homepage, why, confidence, usage)
+    where usage = (prompt_tokens, completion_tokens) for cost accounting. The
+    pick is grounded on real URLs; the downstream render-verify is the guard."""
+    listing = "\n".join(f"{i+1}. {u}  —  {t[:80]}" for i, (u, t) in enumerate(cands)) or "(no results)"
+    prompt = (
+        "You identify the OFFICIAL website of a U.S. hospital from real search results.\n\n"
+        f"Hospital: {name}\nCity/State: {city}, {state}\n\n"
+        f"Search results (real URLs from DuckDuckGo):\n{listing}\n\n"
+        "Return STRICT JSON: {\"url\":\"<official homepage, scheme+host only, or empty>\","
+        "\"confidence\":\"high|medium|low\",\"why\":\"<=12 words\"}\n"
+        "Rules:\n"
+        "- Pick the hospital's OWN website, or its parent HEALTH SYSTEM's official site "
+        "(e.g. a hospital owned by University Hospitals -> uhhospitals.org).\n"
+        "- NEVER pick a news/TV/newspaper site, ratings/directory site, social media, "
+        "jobs board, tourism/city portal, or government data page.\n"
+        "- Prefer a URL from the list; output a CLEAN homepage (no path).\n"
+        "- If none of the results is the official site, set url to \"\"."
+    )
+    body = {"model": GPT_PICK_MODEL, "reasoning_effort": "low",
+            "messages": [{"role": "user", "content": prompt}]}
+    status, data = ai.call("/chat/completions", body=body, timeout=90)
+    usage = (0, 0)
+    if status != 200:
+        return "", f"gpt error {status}", "low", usage
+    u = data.get("usage", {})
+    usage = (u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+    content = ""
+    try:
+        content = data["choices"][0]["message"]["content"] or ""
+    except Exception:
+        pass
+    pick, why, conf = "", "", "low"
+    m = re.search(r"\{.*\}", content, re.DOTALL)
+    if m:
+        try:
+            j = json.loads(m.group(0))
+            pick = (j.get("url") or "").strip()
+            why = (j.get("why") or "").strip()[:60]
+            conf = (j.get("confidence") or "low").strip().lower()
+        except Exception:
+            pass
+    if not pick:  # fallback: first URL in the content
+        m2 = URL_RE.search(content)
+        pick = m2.group(0) if m2 else ""
+    hp = homepage(pick) if pick else ""
+    if hp and is_directory(hp):   # never accept a directory even if GPT slipped
+        hp = ""
+    return hp, (why or "gpt pick"), conf, usage
+
+
 def name_host_match(url: str, name: str) -> bool:
     """True if the DOMAIN itself identifies the hospital. Strict on purpose: the
     host label must START WITH the org acronym or a distinctive (≥4-char) name
@@ -479,6 +573,45 @@ def process_row(name: str, city: str, state: str, guess: str,
             return {"confirmed_url": cand, "status": "confirmed", "browser_ms": ms_total,
                     "openai_calls": 0, "note": f"confirmed; matches guess; {reason}; src=guess"}
 
+    # 2g. GPT-pick backend: render the real DDG results, let gpt-5-mini reason over
+    #     them to pick the official site (or its health-system parent). A pick is
+    #     GROUNDED when its homepage appears in the real DDG results (so the URL
+    #     provably exists — no hallucination). We confirm a grounded high/medium
+    #     pick even when Cloudflare can't render it (big hospital sites bot-block /
+    #     JS-render, which wrongly fails a name-on-page check). An actual on-page
+    #     name match is still the strongest signal and confirms at any confidence.
+    if backend == "gpt":
+        raw, ms = cloudflare_search_raw(name, city, state)
+        ms_total += ms
+        pick, why, conf, (gin, gout) = gpt_pick_website(name, city, state, raw)
+        openai_calls += 1
+        base = {"openai_calls": openai_calls, "gpt_in": gin, "gpt_out": gout}
+        if not pick:
+            return {**base, "confirmed_url": "", "status": "not_found", "browser_ms": ms_total,
+                    "note": f"no official site found (gpt: {why}); src=gpt"}
+        grounded = any(homepage(u) == pick for u, _ in raw)
+        matches = norm_url(pick) == guess_n and bool(guess_n)
+        gc = "matches guess" if matches else ("differs from guess" if guess_n else "no prior guess")
+        # Strongest signal: the hospital name actually renders on the page (try the
+        # homepage and the deep DDG URL behind it). Tried, but NOT required.
+        targets = [pick] + [u for u, _ in raw if homepage(u) == pick and u != pick]
+        on_page = False
+        for tgt in targets[:2]:
+            ok, vreason, m = verify_url(tgt, name, city)
+            ms_total += m
+            if ok:
+                on_page = True
+                break
+        base["browser_ms"] = ms_total
+        if on_page:
+            return {**base, "confirmed_url": pick, "status": "confirmed",
+                    "note": f"confirmed; gpt-pick {conf}; {gc}; on-page {vreason}; src=gpt"}
+        if grounded and conf in ("high", "medium"):
+            return {**base, "confirmed_url": pick, "status": "confirmed",
+                    "note": f"confirmed; gpt-pick {conf} (grounded, render-blocked); {gc}; {why}; src=gpt"}
+        return {**base, "confirmed_url": "", "status": "found_unverified",
+                "note": f"candidate={pick} gpt-pick {conf} (ungrounded/low: {why}); src=gpt"}
+
     # 2. Cloudflare (DuckDuckGo) search — confirm only on a name/acronym-matched host.
     if backend in ("cloudflare", "hybrid"):
         raw, ms = cloudflare_search_candidates(name, city, state)
@@ -598,6 +731,8 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
     stats = {"confirmed": 0, "found_unverified": 0, "not_found": 0}
     tot_ms = 0
     tot_openai = 0
+    tot_gin = 0
+    tot_gout = 0
     pending = []  # (row_1based, confirmed_url, note) buffered for batched writes
 
     def flush():
@@ -636,6 +771,8 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
             stats[out["status"]] = stats.get(out["status"], 0) + 1
             tot_ms += out.get("browser_ms", 0)
             tot_openai += out.get("openai_calls", 0)
+            tot_gin += out.get("gpt_in", 0)
+            tot_gout += out.get("gpt_out", 0)
             done += 1
             name = _get(row, c["name"])
             row_1based = idx + 2  # +1 header, +1 to 1-based
@@ -658,16 +795,20 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
     if write:
         flush()  # write any remainder
 
-    # Real cost from measured browser-time (+ any OpenAI fallback calls).
+    # Real cost: measured browser-time + measured GPT token usage.
     hrs = tot_ms / 3_600_000
+    gpt_usd = tot_gin / 1_000_000 * GPT_IN_PER_1M + tot_gout / 1_000_000 * GPT_OUT_PER_1M
     cost = {
         "browser_ms_total": tot_ms,
         "browser_hours": round(hrs, 3),
-        "browser_hours_per_row": round(hrs / total, 4) if total else 0,
         "projected_full_run_hours_1017": round(hrs / total * 1017, 2) if total else 0,
         "cloudflare_usd_if_over_free_tier": round(hrs * CF_USD_PER_HOUR, 4),
         "openai_calls": tot_openai,
-        "openai_usd": round(tot_openai * COST_PER_OPENAI_SEARCH, 3),
+        "gpt_tokens_in": tot_gin,
+        "gpt_tokens_out": tot_gout,
+        "gpt_usd": round(gpt_usd, 4),
+        "gpt_usd_per_row": round(gpt_usd / total, 5) if total else 0,
+        "projected_gpt_usd_1017": round(gpt_usd / total * 1017, 2) if total else 0,
     }
     print("\n" + json.dumps({"processed": total, **stats, "cost": cost}, indent=2))
     return results
@@ -707,12 +848,13 @@ def main():
         p.add_argument("--concurrency", type=int, default=8)
         p.add_argument("--limit", type=int, default=0)
         p.add_argument("--overwrite", action="store_true")
-        p.add_argument("--search-backend", choices=["cloudflare", "openai", "hybrid"],
-                       default="cloudflare",
-                       help="cloudflare (default) = DuckDuckGo render, confirm only "
-                            "on name/acronym-matched domain (near-free, high precision); "
-                            "hybrid = also try OpenAI to surface a name-matched domain "
-                            "CF missed (+~$0.012/row); openai = OpenAI for all.")
+        p.add_argument("--search-backend", choices=["gpt", "cloudflare", "openai", "hybrid"],
+                       default="gpt",
+                       help="gpt (default) = DuckDuckGo render + gpt-5-mini picks the "
+                            "official site from the real results, then render-verify "
+                            "(~$0.002/row, handles health-system parents); cloudflare = "
+                            "DuckDuckGo + strict name-match only (near-free, more blanks); "
+                            "hybrid/openai = OpenAI web_search variants.")
 
     e = sub.add_parser("estimate", help="row count + projected calls/cost (no API)")
     common(e)

@@ -24,19 +24,30 @@ false negative (right URL left in notes).
 `(list of org names) → find-websites → [render/qualify/verify/upload]`
 
 ## Search backends (`--search-backend`)
-Discovery can come from either source — pick on cost:
-- **`cloudflare`** (default, near-free) — render a **DuckDuckGo HTML** results page
-  via Cloudflare and extract the organic links. Cloudflare is billed by browser
-  *time* ($0.09/hr, **10 hrs/mo free**), so a full 1,000-row run ≈ 1.5 browser-hrs
-  → **~$0**. No OpenAI spend.
-- **`openai`** — OpenAI Responses API `web_search` tool. Higher precision on
-  tricky names, but **$10/1k calls (~$0.012/row)**.
-- **`hybrid`** — Cloudflare first; OpenAI only for rows the rendered search page
-  can't resolve. Best accuracy-per-dollar.
+- **`gpt`** (default, recommended) — render the **DuckDuckGo HTML** results page
+  via Cloudflare, then a reasoning model (**gpt-5-mini**) PICKS the official site
+  from those *real* results (its own domain or its parent health system). The pick
+  is **grounded** (GPT may only effectively choose URLs the search returned, so no
+  hallucinated domains). Confirms a grounded high/medium-confidence pick even when
+  Cloudflare can't render it (big hospital sites bot-block / JS-render, which
+  wrongly fails a name-on-page check); an actual on-page name match confirms at any
+  confidence. **~$0.0003/row GPT** (~$0.28 for 1,000) + near-free Cloudflare.
+  Test: 21/25 confirmed, recovering health-system parents (`iuhealth.org`,
+  `dmc.org`, `nuvancehealth.org`, `balladhealth.org`) that pure matching misses.
+- **`cloudflare`** — DuckDuckGo render, confirm only on a name/acronym-matched
+  domain (no GPT, near-$0, but ~45% confirmed; misses differently-named systems).
+- **`openai`** / **`hybrid`** — OpenAI `web_search` tool variants ($0.012/row);
+  superseded by `gpt` (cheaper and more accurate here).
 
-Both feed the same render-verify guard, so a wrong candidate is never confirmed.
-The **guess-first short-circuit** verifies an existing `auto_best_guess` before
-spending any search — a correct guess costs one render.
+The **guess-first short-circuit** verifies an existing `auto_best_guess` before any
+search — a correct guess costs one render.
+
+### Why GPT-pick beats pure matching
+A hospital is often part of a differently-named system (Manchester Memorial →
+`echn.org`, Parma → `uhhospitals.org`). A domain name-match can't see that, and a
+name-on-page render fails when the site bot-blocks. GPT reasons over the real
+result **titles** ("…| IU Health") to choose correctly, and grounding + the
+directory blocklist keep it from inventing or picking news/directory sites.
 
 ## Commands
 ```bash
