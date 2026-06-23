@@ -377,7 +377,16 @@ def gpt_pick_website(name, city, state, cands):
     )
     body = {"model": GPT_PICK_MODEL, "reasoning_effort": "low",
             "messages": [{"role": "user", "content": prompt}]}
-    status, data = ai.call("/chat/completions", body=body, timeout=90)
+    status, data = 0, {}
+    for attempt in range(3):   # transient proxy/network errors → retry with backoff
+        try:
+            status, data = ai.call("/chat/completions", body=body, timeout=90)
+            if status == 200:
+                break
+        except (Exception, SystemExit):
+            status, data = 0, {}
+        if attempt < 2:
+            time.sleep(1.5 * (attempt + 1))
     usage = (0, 0)
     if status != 200:
         return "", f"gpt error {status}", "low", usage
@@ -754,7 +763,7 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
                 sh._api("POST", f"{sh.SHEETS}/{sheet_id}/values:batchUpdate",
                         {"valueInputOption": "RAW", "data": data_ranges})
                 break
-            except Exception as e:
+            except (Exception, SystemExit) as e:  # _api sys.exit()s on HTTP errors
                 if "429" in str(e) and attempt < 4:
                     time.sleep(2 ** attempt * 2)
                     continue
@@ -763,8 +772,15 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
 
     def work(item):
         idx, row = item
-        out = process_row(_get(row, c["name"]), _get(row, c["city"]),
-                          _get(row, c["state"]), _get(row, c["guess"]), backend=backend)
+        try:
+            out = process_row(_get(row, c["name"]), _get(row, c["city"]),
+                              _get(row, c["state"]), _get(row, c["guess"]), backend=backend)
+        except (Exception, SystemExit) as e:
+            # One row's transient failure (proxy 502, etc.) must not kill the batch.
+            # Leave it blank+noted; a later run (no --overwrite) retries blank rows.
+            out = {"confirmed_url": "", "status": "error", "browser_ms": 0,
+                   "openai_calls": 0, "gpt_in": 0, "gpt_out": 0,
+                   "note": f"processing error ({str(e)[:100]}); src={backend}"}
         return idx, row, out
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
@@ -785,12 +801,14 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
                 if len(pending) >= getattr(args, "flush_every", 10):   # real-time batched flush
                     flush()
                     if args.status_cell:
+                        # values.update is PUT (POST to values/{range} 404s); keep it
+                        # strictly non-fatal — _api raises SystemExit on any error.
                         try:
-                            sh._api("POST", f"{sh.SHEETS}/{sheet_id}/values/"
+                            sh._api("PUT", f"{sh.SHEETS}/{sheet_id}/values/"
                                     f"{_range(tab, args.status_cell)}?valueInputOption=RAW",
                                     {"values": [[f"find-websites {done}/{total} "
                                                  f"({stats['confirmed']} confirmed)"]]})
-                        except Exception:
+                        except (Exception, SystemExit):
                             pass
             tag = out["status"].upper()
             print(f"  [{done}/{total}] {tag:16} {name[:42]:42} -> "
