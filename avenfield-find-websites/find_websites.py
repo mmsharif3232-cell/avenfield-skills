@@ -198,8 +198,21 @@ def _range_body(tab: str, cells: str) -> str:
     return tab + "!" + cells
 
 
+def _api_retry(method, url, body=None, tries=5):
+    """sh._api with retry — the agent proxy can 502 transiently; one blip on a
+    read/auth call shouldn't abort the whole run. _api sys.exit()s on error, so
+    catch SystemExit too."""
+    for attempt in range(tries):
+        try:
+            return sh._api(method, url, body)
+        except (Exception, SystemExit):
+            if attempt == tries - 1:
+                raise
+            time.sleep(2 ** attempt)
+
+
 def read_tab(sheet_id: str, tab: str) -> list[list[str]]:
-    raw = sh._api("GET", f"{sh.SHEETS}/{sheet_id}/values/{_range(tab, 'A1:ZZ')}", None)
+    raw = _api_retry("GET", f"{sh.SHEETS}/{sheet_id}/values/{_range(tab, 'A1:ZZ')}", None)
     return raw.get("values", [])
 
 
