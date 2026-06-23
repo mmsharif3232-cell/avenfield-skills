@@ -306,7 +306,26 @@ def cloudflare_search_candidates(name: str, city: str, state: str) -> tuple[list
         return s
 
     cands.sort(key=score)
-    return [full for full, _ in cands], ms
+    # Re-rank to 0..n by DDG position so the caller knows which is the #1 organic
+    # result (the authoritative site usually ranks first; news/directories rank lower).
+    by_pos = sorted(cands, key=lambda it: it[1])
+    rank = {full: i for i, (full, _) in enumerate(by_pos)}
+    return [(full, rank[full]) for full, _ in cands], ms
+
+
+def name_host_match(url: str, name: str) -> bool:
+    """True if the DOMAIN itself identifies the hospital. Strict on purpose: the
+    host label must START WITH the org acronym or a distinctive (≥4-char) name
+    token (or the acronym appears whole inside it). Substring-anywhere is too loose
+    — place-named hospitals collide with local news/portals ('clinton' inside
+    'chooseclintoncountyoh', 'valley' inside 'paulsvalleydailydemocrat')."""
+    label = re.sub(r"[^a-z0-9]", "", host_of(url).split(".")[0])
+    if not label:
+        return False
+    acr = acronym(name)
+    if len(acr) >= 3 and (label.startswith(acr) or acr in label):
+        return True
+    return any(len(t) >= 4 and label.startswith(t) for t in name_tokens(name))
 
 
 # ── web search (OpenAI fallback) ──────────────────────────────────────────────
@@ -404,64 +423,93 @@ def verify_url(url: str, name: str, city: str) -> tuple[bool, str, int]:
     return False, f"name not found ({hits}/{len(toks)} tokens, city={'y' if city_ok else 'n'})", ms
 
 
+def _try_confirm(cands, name, city, guess_n, src):
+    """Verify a ranked candidate list. cands = [(url, trusted)].
+
+    Only a TRUSTED host (its domain matches the hospital name/acronym) can be
+    confirmed — a verified-but-untrusted host (a news site or directory that just
+    mentions the name) is recorded as a weak candidate but NEVER written as
+    confirmed. Returns (result_or_None, ms_used, weak_candidate, last_reason).
+    """
+    ms = 0
+    weak = ""
+    last_reason = ""
+    ordered = sorted(cands, key=lambda t: (norm_url(homepage(t[0])) != guess_n, not t[1]))
+    for cand, trusted in ordered[:4]:
+        ok, reason, m = verify_url(cand, name, city)
+        ms += m
+        if not ok:
+            last_reason = reason
+            continue
+        hp = homepage(cand) or cand
+        if not trusted:
+            weak = weak or hp
+            last_reason = "verified but host doesn't match name (news/directory?)"
+            continue
+        matches = norm_url(hp) == guess_n and bool(guess_n)
+        conf = "matches guess" if matches else ("differs from guess" if guess_n else "no prior guess")
+        return ({"confirmed_url": hp, "status": "confirmed",
+                 "note": f"confirmed; {conf}; {reason}; src={src}"}, ms, weak, last_reason)
+    return (None, ms, weak, last_reason)
+
+
 def process_row(name: str, city: str, state: str, guess: str,
-                backend: str = "cloudflare") -> dict:
+                backend: str = "hybrid") -> dict:
     """Full per-row pipeline. Returns dict with confirmed_url + note + status +
-    browser_ms (+ openai_calls for cost accounting)."""
+    browser_ms (+ openai_calls for cost accounting).
+
+    A URL is only CONFIRMED when its domain matches the hospital name/acronym
+    (the trustworthy signal). The bare 'name appears on the page' check is NOT
+    enough on its own — news/directory pages contain hospital names too.
+    """
     ms_total = 0
     openai_calls = 0
     guess_n = norm_url(guess)
+    weak = ""
+    last_reason = "no candidate"
 
-    # 1. Guess-first short-circuit: if there's an existing non-directory guess,
-    #    verify IT before spending a search. A correct guess costs one render.
+    # 1. Guess-first short-circuit: verify an existing non-directory guess before
+    #    spending a search. A correct guess costs one render. (The guess column is
+    #    a vetted best-guess, so a verified guess is trusted regardless of host.)
     if guess and not is_directory(guess):
         cand = homepage(guess) or guess
         ok, reason, ms = verify_url(cand, name, city)
         ms_total += ms
         if ok:
             return {"confirmed_url": cand, "status": "confirmed", "browser_ms": ms_total,
-                    "openai_calls": 0,
-                    "note": f"confirmed; matches guess; {reason}; src=guess"}
+                    "openai_calls": 0, "note": f"confirmed; matches guess; {reason}; src=guess"}
 
-    # 2. Search for candidates via the chosen backend.
-    src = backend
-    if backend == "openai":
-        cands = web_search_candidates(name, city, state)
+    # 2. Cloudflare (DuckDuckGo) search — confirm only on a name/acronym-matched host.
+    if backend in ("cloudflare", "hybrid"):
+        raw, ms = cloudflare_search_candidates(name, city, state)
+        ms_total += ms
+        cf_cands = [(u, name_host_match(u, name)) for u, _ in raw]
+        res, ms2, weak, last_reason = _try_confirm(cf_cands, name, city, guess_n, "ddg")
+        ms_total += ms2
+        if res:
+            return {**res, "browser_ms": ms_total, "openai_calls": openai_calls}
+
+    # 3. OpenAI fallback (openai backend always; hybrid only when CF didn't confirm).
+    #    OpenAI gets the SAME trust discipline — it can also return a newspaper or
+    #    portal page, so only a name/acronym-matched domain auto-confirms; anything
+    #    else becomes a noted candidate for a human, never a written confirmed_url.
+    if backend in ("openai", "hybrid"):
+        oc = [(u, name_host_match(u, name)) for u in web_search_candidates(name, city, state)]
         openai_calls += 1
-    else:  # cloudflare (default) or hybrid
-        cands, ms = cloudflare_search_candidates(name, city, state)
-        ms_total += ms
-        src = "ddg"
-        if not cands and backend == "hybrid":
-            cands = web_search_candidates(name, city, state)
-            openai_calls += 1
-            src = "openai-fallback"
+        res, ms3, weak2, lr2 = _try_confirm(oc, name, city, guess_n, "openai")
+        ms_total += ms3
+        if res:
+            return {**res, "browser_ms": ms_total, "openai_calls": openai_calls}
+        weak = weak or weak2
+        last_reason = lr2 or last_reason
 
-    if not cands:
-        return {"confirmed_url": "", "status": "not_found", "browser_ms": ms_total,
+    if weak:
+        return {"confirmed_url": "", "status": "found_unverified", "browser_ms": ms_total,
                 "openai_calls": openai_calls,
-                "note": f"no official site found; src={src}"}
-
-    # 3. Verify candidates, best-first; prefer one whose homepage matches the guess.
-    #    We render the FULL result URL (its path may carry the hospital name) but
-    #    write the clean homepage as the confirmed URL.
-    ordered = sorted(cands, key=lambda u: (norm_url(homepage(u)) != guess_n))
-    last_reason = ""
-    for cand in ordered[:3]:   # cap verify renders per row
-        ok, reason, ms = verify_url(cand, name, city)
-        ms_total += ms
-        last_reason = reason
-        if ok:
-            hp = homepage(cand) or cand
-            matches = norm_url(hp) == guess_n and bool(guess_n)
-            conf = "matches guess" if matches else ("differs from guess" if guess_n else "no prior guess")
-            return {"confirmed_url": hp, "status": "confirmed", "browser_ms": ms_total,
-                    "openai_calls": openai_calls,
-                    "note": f"confirmed; {conf}; {reason}; src={src}"}
-
-    return {"confirmed_url": "", "status": "found_unverified", "browser_ms": ms_total,
+                "note": f"candidate={weak} unverified ({last_reason}); src={backend}"}
+    return {"confirmed_url": "", "status": "not_found", "browser_ms": ms_total,
             "openai_calls": openai_calls,
-            "note": f"candidate={homepage(ordered[0]) or ordered[0]} unverified ({last_reason}); src={src}"}
+            "note": f"no official site found ({last_reason}); src={backend}"}
 
 
 # ── sheet plumbing for commands ───────────────────────────────────────────────
@@ -550,6 +598,29 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
     stats = {"confirmed": 0, "found_unverified": 0, "not_found": 0}
     tot_ms = 0
     tot_openai = 0
+    pending = []  # (row_1based, confirmed_url, note) buffered for batched writes
+
+    def flush():
+        """Write all buffered cells in ONE batchUpdate request (stays under the
+        Sheets 'write requests per minute' quota — per-cell writes blow it)."""
+        if not pending:
+            return
+        cc, nc = idx_to_col(c["confirmed"]), idx_to_col(c["notes"])
+        data_ranges = []
+        for r1, conf, note in pending:
+            data_ranges.append({"range": _range_body(tab, f"{cc}{r1}"), "values": [[conf]]})
+            data_ranges.append({"range": _range_body(tab, f"{nc}{r1}"), "values": [[note]]})
+        for attempt in range(5):
+            try:
+                sh._api("POST", f"{sh.SHEETS}/{sheet_id}/values:batchUpdate",
+                        {"valueInputOption": "RAW", "data": data_ranges})
+                break
+            except Exception as e:
+                if "429" in str(e) and attempt < 4:
+                    time.sleep(2 ** attempt * 2)
+                    continue
+                raise
+        pending.clear()
 
     def work(item):
         idx, row = item
@@ -569,19 +640,23 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
             name = _get(row, c["name"])
             row_1based = idx + 2  # +1 header, +1 to 1-based
             if write:
-                write_cell(sheet_id, tab, c["confirmed"], row_1based, out["confirmed_url"])
-                write_cell(sheet_id, tab, c["notes"], row_1based, out["note"])
-                if args.status_cell:
-                    try:
-                        sh._api("POST", f"{sh.SHEETS}/{sheet_id}/values/"
-                                f"{_range(tab, args.status_cell)}?valueInputOption=RAW",
-                                {"values": [[f"find-websites {done}/{total} "
-                                             f"({stats['confirmed']} confirmed)"]]})
-                    except Exception:
-                        pass
+                pending.append((row_1based, out["confirmed_url"], out["note"]))
+                if len(pending) >= 40:        # flush in batches
+                    flush()
+                    if args.status_cell:
+                        try:
+                            sh._api("POST", f"{sh.SHEETS}/{sheet_id}/values/"
+                                    f"{_range(tab, args.status_cell)}?valueInputOption=RAW",
+                                    {"values": [[f"find-websites {done}/{total} "
+                                                 f"({stats['confirmed']} confirmed)"]]})
+                        except Exception:
+                            pass
             tag = out["status"].upper()
             print(f"  [{done}/{total}] {tag:16} {name[:42]:42} -> "
                   f"{out['confirmed_url'] or '(blank)'}", flush=True)
+
+    if write:
+        flush()  # write any remainder
 
     # Real cost from measured browser-time (+ any OpenAI fallback calls).
     hrs = tot_ms / 3_600_000
@@ -634,9 +709,10 @@ def main():
         p.add_argument("--overwrite", action="store_true")
         p.add_argument("--search-backend", choices=["cloudflare", "openai", "hybrid"],
                        default="cloudflare",
-                       help="cloudflare = DuckDuckGo render (near-free); "
-                            "openai = web_search tool ($0.012/call); "
-                            "hybrid = cloudflare then openai fallback.")
+                       help="cloudflare (default) = DuckDuckGo render, confirm only "
+                            "on name/acronym-matched domain (near-free, high precision); "
+                            "hybrid = also try OpenAI to surface a name-matched domain "
+                            "CF missed (+~$0.012/row); openai = OpenAI for all.")
 
     e = sub.add_parser("estimate", help="row count + projected calls/cost (no API)")
     common(e)
