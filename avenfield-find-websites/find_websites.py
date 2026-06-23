@@ -739,8 +739,11 @@ def cmd_estimate(args):
 
 def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
     """Shared worker for test (write=False) and run (write=True)."""
+    start = getattr(args, "start", 0) or 0
     todo = []
     for i, r in enumerate(data):
+        if i < start:   # skip the first `start` data rows (e.g. --start 100 = row 101+)
+            continue
         name = _get(r, c["name"])
         if not name:
             continue
@@ -935,6 +938,9 @@ def main():
         p.add_argument("--confirmed-col", default="confirmed_url")
         p.add_argument("--notes-col", default="va_notes")
         p.add_argument("--concurrency", type=int, default=10)
+        p.add_argument("--start", type=int, default=0,
+                       help="skip the first N data rows (0-based; row 1 = first "
+                            "hospital under the header). e.g. --start 100 = row 101+.")
         p.add_argument("--limit", type=int, default=0)
         p.add_argument("--overwrite", action="store_true")
         p.add_argument("--flush-every", type=int, default=10,
