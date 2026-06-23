@@ -357,7 +357,10 @@ def cloudflare_search_raw(name: str, city: str, state: str):
         if not real:
             continue
         hp = homepage(real)
-        if not hp or is_directory(hp):
+        # No directory pre-filter here: GPT sees ALL real DDG results and reasons
+        # over the titles to pick the official site (the prompt tells it to skip
+        # news/directory/social/jobs/gov pages). "Fully trust GPT" — see SKILL.md.
+        if not hp:
             continue
         if hp not in seen:
             seen.add(hp)
@@ -424,8 +427,8 @@ def gpt_pick_website(name, city, state, cands):
         m2 = URL_RE.search(content)
         pick = m2.group(0) if m2 else ""
     hp = homepage(pick) if pick else ""
-    if hp and is_directory(hp):   # never accept a directory even if GPT slipped
-        hp = ""
+    # No directory guard: we fully trust GPT's pick (the prompt instructs it to
+    # avoid directory/news/social pages). See SKILL.md "Fully trust GPT".
     return hp, (why or "gpt pick"), conf, usage
 
 
@@ -888,7 +891,7 @@ def cmd_trace(args):
     q = " ".join(p for p in (name, city, state) if p).strip()
     print(f"\n[2] Cloudflare 'links' on: {DDG_HTML}{urllib.parse.quote(q)}")
     raw, ms = cloudflare_search_raw(name, city, state)
-    print(f"    browser-ms={ms}; {len(raw)} candidate(s) after decode+directory-filter:")
+    print(f"    browser-ms={ms}; {len(raw)} candidate(s) after decode+dedupe (no directory pre-filter):")
     for i, (u, t) in enumerate(raw):
         print(f"      {i+1}. {u}\n         title: {t[:90]!r}")
 

@@ -26,9 +26,13 @@ false negative (right URL left in notes).
 ## Search backends (`--search-backend`)
 - **`gpt`** (default, recommended) — render the **DuckDuckGo HTML** results page
   via Cloudflare, then a reasoning model (**gpt-5-mini**) PICKS the official site
-  from those *real* results (its own domain or its parent health system). The pick
-  is **grounded** (GPT may only effectively choose URLs the search returned, so no
-  hallucinated domains). Confirms a grounded high/medium-confidence pick even when
+  from those *real* results (its own domain or its parent health system). **All**
+  DDG results are passed to GPT — no directory/aggregator pre-filter — and GPT's
+  pick is trusted as-is (no post-pick directory guard); the prompt instructs GPT to
+  skip news/directory/social/jobs/gov pages, and it reasons over the result titles
+  to do so ("fully trust GPT"). The pick is still **grounded** (GPT may only
+  effectively choose URLs the search returned, so no hallucinated domains). Confirms
+  a grounded high/medium-confidence pick even when
   Cloudflare can't render it (big hospital sites bot-block / JS-render, which
   wrongly fails a name-on-page check); an actual on-page name match confirms at any
   confidence. **~$0.0003/row GPT** (~$0.28 for 1,000) + near-free Cloudflare.
@@ -112,9 +116,13 @@ Statuses written to `va_notes`:
   wouldn't. Render the full URL, confirm, then store `homepage()` as confirmed.
 - **Directory aggregators are the main false-positive risk.** Sites like
   `hospitalsandclinics.net`, `opennpi.com`, `pa211.org`, and `.edu` colleges that
-  share the hospital's name will *pass* a name-on-page check. They're blocklisted
-  (incl. all `.edu`/`.gov` — this list is community/CAH hospitals, not universities).
-  Expect a long tail; add new aggregators to `DIRECTORY_HOSTS` as they appear.
+  share the hospital's name will *pass* a name-on-page check. The **`gpt` backend
+  no longer pre-filters these** — it passes all DDG results to GPT and trusts the
+  pick, leaning on the prompt's "skip directory/news/social/gov" rule (that prompt
+  rule is now GPT's only directory defense — tune it there if one ever slips
+  through). The legacy `cloudflare`/`openai` backends and the guess-first
+  short-circuit still use the `DIRECTORY_HOSTS` blocklist (incl. all `.edu`/`.gov`),
+  since they have no GPT reasoning step; add new aggregators there if needed.
 - **`X-Browser-Ms-Used` is a float string.** Parse it with `float()` then round —
   `int()` throws on `'1384.10'` and silently fails every render.
 - **Web search ≠ official site.** Searches love to return Google Maps, Facebook,
