@@ -819,7 +819,7 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
                 pending.append((row_1based, out["confirmed_url"], out["note"]))
                 if len(pending) >= getattr(args, "flush_every", 10):   # real-time batched flush
                     flush()
-                    if args.status_cell:
+                    if getattr(args, "status_cell", None):
                         # values.update is PUT (POST to values/{range} 404s); keep it
                         # strictly non-fatal — _api raises SystemExit on any error.
                         try:
@@ -859,9 +859,12 @@ def cmd_test(args):
     sheet_id = sh._sheet_id(args.sheet)
     hdr, data = _load(sheet_id, args.tab)
     c = _cols(hdr, args)
-    print(f"(test mode — writing NOTHING to the sheet; sampling {args.n} rows)\n")
-    _run_batch(sheet_id, args.tab, hdr, data, c, args, write=False)
-    print("\nTest complete. Review above, then run the full pass without --n.")
+    print(f"(test mode — sampling {args.n} rows; results ARE written to the sheet, "
+          f"same as run)\n")
+    _run_batch(sheet_id, args.tab, hdr, data, c, args, write=True)
+    print(f"\nTest complete — wrote confirmed_url (col {idx_to_col(c['confirmed'])}) + "
+          f"va_notes (col {idx_to_col(c['notes'])}) for the sampled rows. "
+          f"Run the full pass without --n.")
 
 
 def cmd_run(args):

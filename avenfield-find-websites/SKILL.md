@@ -64,9 +64,10 @@ python3 $F trace --name "INDIANA UNIVERSITY HEALTH FRANKFORT INC" --city FRANKFO
 # 1. estimate — rows + projected renders/browser-hours + $ (NO API calls)
 python3 $F estimate --sheet <ID> --tab VA_Worklist [--search-backend cloudflare]
 
-# 2. test — run the full pipeline on N rows, print results + MEASURED browser-ms,
-#    WRITE NOTHING
-python3 $F test --sheet <ID> --tab VA_Worklist --n 25 [--search-backend cloudflare]
+# 2. test — run the full pipeline on a SAMPLE of N rows, print results +
+#    MEASURED browser-ms, and WRITE those rows to the sheet (same as run, just
+#    capped to N). Use --n to size the sample; --start to begin partway down.
+python3 $F test --sheet <ID> --tab VA_Worklist --n 25 [--start 100] [--search-backend cloudflare]
 
 # 3. run — full pass: writes confirmed_url + va_notes, idempotent, concurrent
 python3 $F run --sheet <ID> --tab VA_Worklist [--limit N] [--overwrite] \
