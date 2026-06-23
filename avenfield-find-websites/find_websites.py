@@ -39,6 +39,8 @@ import re
 import sys
 import time
 import urllib.parse
+import urllib.request
+import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -59,23 +61,46 @@ import ai          # noqa: E402  OpenAI passthrough (call())
 import cf_render   # noqa: E402  Cloudflare render (render_text())
 import sheets as sh  # noqa: E402  Google Sheets (_api, SHEETS, _sheet_id)
 
-# Web-search model + cost knobs.
-SEARCH_MODEL = "gpt-4o-mini"          # used with the Responses API web_search tool
+# OpenAI web-search backend (fallback). Responses API web_search tool.
+SEARCH_MODEL = "gpt-4o-mini"
 SEARCH_TOOL = {"type": "web_search"}
-# Rough unit costs for the estimate (order-of-magnitude, not billing-exact).
-COST_PER_SEARCH = 0.030               # web-search tool call + tokens
-COST_PER_RENDER = 0.005               # Cloudflare render
+COST_PER_OPENAI_SEARCH = 0.012        # $10/1k calls + ~$0.001-0.002 tokens (real)
 
-# Hosts that are never an org's own official site.
+# Cloudflare Browser Rendering is billed by DURATION, not per request:
+# $0.09/browser-hour, 10 browser-hours/month free on Workers Paid.
+# Source: developers.cloudflare.com/browser-rendering/platform/pricing/
+CF_USD_PER_HOUR = 0.09
+CF_FREE_HOURS = 10.0
+DDG_HTML = "https://html.duckduckgo.com/html/?q="  # scrape-friendly results page
+
+# Hosts that are never an org's own official site (social, search, and the many
+# hospital-directory aggregators DuckDuckGo surfaces — these list the hospital's
+# name+city, so they'd FALSELY pass the verify guard if not blocked).
 DIRECTORY_HOSTS = {
+    # social / search / general
     "facebook.com", "m.facebook.com", "linkedin.com", "wikipedia.org",
-    "en.wikipedia.org", "yelp.com", "healthgrades.com", "usnews.com",
+    "en.wikipedia.org", "yelp.com", "usnews.com", "health.usnews.com",
     "cms.gov", "medicare.gov", "data.cms.gov", "indeed.com", "x.com",
-    "twitter.com", "instagram.com", "vitals.com", "ratemds.com",
-    "mapquest.com", "glassdoor.com", "google.com", "maps.google.com",
-    "bing.com", "youtube.com", "tiktok.com", "yellowpages.com",
-    "bbb.org", "zocdoc.com", "webmd.com", "ziprecruiter.com",
-    "google.com/maps", "foursquare.com", "manta.com", "dnb.com",
+    "twitter.com", "instagram.com", "mapquest.com", "glassdoor.com",
+    "google.com", "maps.google.com", "bing.com", "youtube.com", "tiktok.com",
+    "yellowpages.com", "bbb.org", "ziprecruiter.com", "foursquare.com",
+    "manta.com", "dnb.com", "superpages.com", "allnurses.com", "allbiz.com",
+    # hospital/health directory aggregators
+    "healthgrades.com", "vitals.com", "ratemds.com", "zocdoc.com", "webmd.com",
+    "hospitalsandclinics.net", "hospitalcaredata.com", "healthcarecomps.com",
+    "nationalhealthratings.com", "seniorhealthdatabase.com", "ourhealthnetwork.com",
+    "healthcare4ppl.com", "myhospitalnow.com", "localoffices.org", "carelistings.com",
+    "alaha.org", "hospital-data.com", "projects.propublica.org", "propublica.org",
+    "ahd.com", "definitivehc.com", "beckershospitalreview.com", "ahdtools.com",
+    "communitybenefitinsight.org", "medicalrecords.com", "caredash.com",
+    "doximity.com", "sharecare.com", "wellness.com", "hospitalbycity.com",
+    # social-service / 211 directories (share hospital names, not the org site)
+    "pa211.org", "211.org", "auntbertha.com", "findhelp.org", "unitedway.org",
+    "guidestar.org", "causeiq.com", "nonprofitlight.com",
+    # NPI / provider-lookup directories
+    "opennpi.com", "npidb.org", "npino.com", "hipaaspace.com", "npiprofile.com",
+    "healthsoul.com", "nplocator.com", "docinfo.org", "npi.io", "hospital.io",
+    "findadoctor.com", "medlineplus.gov", "clinicaltrials.gov",
 }
 # Tokens too generic to count as a name match.
 STOP_TOKENS = {
@@ -117,6 +142,11 @@ def homepage(u: str) -> str:
 
 def is_directory(u: str) -> bool:
     h = host_of(u)
+    # .edu/.gov are colleges/agencies that share hospital names (e.g. Penn
+    # Highlands Community College = pennhighlands.edu) — not the hospital's site.
+    # This CMS list is community/critical-access hospitals, not universities.
+    if h.endswith(".edu") or h.endswith(".gov"):
+        return True
     return any(h == d or h.endswith("." + d) for d in DIRECTORY_HOSTS)
 
 
@@ -175,7 +205,111 @@ def write_cell(sheet_id: str, tab: str, col_idx: int, row_1based: int, value: st
     })
 
 
-# ── web search ────────────────────────────────────────────────────────────────
+# ── Cloudflare render (captures X-Browser-Ms-Used for real cost) ──────────────
+def cf_render_ms(endpoint: str, payload: dict, timeout: float = 60.0,
+                 retries: int = 2) -> tuple[bool, int, str, int]:
+    """Like cf_render.render_text but also returns browser-ms used.
+
+    Returns (ok, status, result, browser_ms). browser_ms is summed across the run
+    to compute the real Cloudflare cost (billed by duration, not per request).
+    """
+    acct, tok = cf_render._creds()
+    url = f"{cf_render.API_BASE}/{acct}/browser-rendering/{endpoint}"
+    data = json.dumps(payload).encode()
+    last = (False, 0, "[render error: unknown]", 0)
+    for attempt in range(retries + 1):
+        try:
+            req = urllib.request.Request(url, data=data, method="POST", headers={
+                "Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body, status = r.read(), r.status
+                ms = round(float(r.headers.get("X-Browser-Ms-Used", 0) or 0))
+        except urllib.error.HTTPError as e:
+            body, status = e.read(), e.code
+            ms = round(float(e.headers.get("X-Browser-Ms-Used", 0) or 0))
+        except Exception as e:
+            last = (False, 0, f"[render error: {e}]", 0)
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return last
+        text = body.decode("utf-8", "replace")
+        if status == 200:
+            try:
+                res = json.loads(text).get("result")
+            except (json.JSONDecodeError, AttributeError):
+                res = text
+            if not isinstance(res, str):
+                res = json.dumps(res, ensure_ascii=False)
+            return (True, status, res, ms)
+        last = (False, status, f"[render failed {status}: {text[:160]}]", ms)
+        if status in cf_render.TRANSIENT and attempt < retries:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        return last
+    return last
+
+
+def decode_ddg(u: str) -> str:
+    """DuckDuckGo HTML results wrap targets in /l/?uddg=<encoded>. Decode to the
+    real URL; drop DuckDuckGo's own nav/feedback links."""
+    if "duckduckgo.com/l/" in u:
+        qs = urllib.parse.urlparse(u).query
+        return urllib.parse.parse_qs(qs).get("uddg", [""])[0]
+    if "duckduckgo.com" in host_of(u):
+        return ""
+    return u
+
+
+def cloudflare_search_candidates(name: str, city: str, state: str) -> tuple[list[str], int]:
+    """Render a DuckDuckGo results page via Cloudflare, extract + rank organic
+    links. Returns (candidate_homepages_best_first, browser_ms)."""
+    q = " ".join(p for p in (name, city, state) if p).strip()
+    url = DDG_HTML + urllib.parse.quote(q)
+    ok, status, result, ms = cf_render_ms("links", {"url": url}, timeout=60, retries=2)
+    if not ok:
+        return [], ms
+    try:
+        links = json.loads(result)
+    except Exception:
+        return [], ms
+    if not isinstance(links, list):
+        return [], ms
+
+    toks, acr = name_tokens(name), acronym(name)
+    # Keep the FULL result URL (its deep path often carries the specific hospital
+    # name, so the verify render can confirm it even when the bare homepage can't —
+    # e.g. phhealthcare.org/locations/huntingdon). Dedupe by homepage host.
+    cands: list[tuple[str, int]] = []   # (full_url, ddg_position)
+    seen = set()
+    for idx, L in enumerate(links):
+        raw = L.get("url", "") if isinstance(L, dict) else str(L)
+        real = decode_ddg(raw)
+        if not real:
+            continue
+        hp = homepage(real)
+        if not hp or is_directory(hp):
+            continue
+        if hp not in seen:
+            seen.add(hp)
+            cands.append((real, idx))
+
+    def score(item):
+        full, pos = item
+        label = re.sub(r"[^a-z0-9]", "", host_of(full).split(".")[0])
+        s = pos  # DuckDuckGo's own ranking is a strong prior (top result = best)
+        if len(acr) >= 3 and label.startswith(acr):
+            s -= 5
+        s -= sum(1 for t in toks if t in label)
+        if homepage(full).endswith((".org", ".com")):
+            s -= 1
+        return s
+
+    cands.sort(key=score)
+    return [full for full, _ in cands], ms
+
+
+# ── web search (OpenAI fallback) ──────────────────────────────────────────────
 def web_search_candidates(name: str, city: str, state: str) -> list[str]:
     """Return candidate URLs (homepages) from an OpenAI web search, best-first.
 
@@ -230,8 +364,9 @@ def acronym(name: str) -> str:
     return "".join(w[0] for w in words)
 
 
-def verify_url(url: str, name: str, city: str) -> tuple[bool, str]:
-    """Render the URL and confirm the org is really there. Returns (ok, reason).
+def verify_url(url: str, name: str, city: str) -> tuple[bool, str, int]:
+    """Render the URL and confirm the org is really there.
+    Returns (ok, reason, browser_ms).
 
     Conservative on purpose — a false positive (wrong URL written as confirmed)
     is worse than a false negative (correct URL left in notes for a human). Two
@@ -243,13 +378,13 @@ def verify_url(url: str, name: str, city: str) -> tuple[bool, str]:
          2+ tokens → a majority; a lone generic token (e.g. 'Mercy') → that
          token AND the city, since one common word can't stand alone.
     """
-    ok, status, md = cf_render.render_text("markdown", {"url": url}, timeout=60, retries=2)
+    ok, status, md, ms = cf_render_ms("markdown", {"url": url}, timeout=60, retries=2)
     if not ok or not md or md.startswith("[render"):
-        return False, f"render failed ({status})"
+        return False, f"render failed ({status})", ms
     low = md.lower()
     toks = name_tokens(name)
     if not toks:
-        return False, "no usable name tokens"
+        return False, "no usable name tokens", ms
     hits = sum(1 for t in toks if t in low)
     city_ok = bool(city) and city.strip().lower() in low
 
@@ -257,7 +392,7 @@ def verify_url(url: str, name: str, city: str) -> tuple[bool, str]:
     host_label = re.sub(r"[^a-z0-9]", "", host_of(url).split(".")[0])
     acr = acronym(name)
     if len(acr) >= 3 and host_label.startswith(acr):
-        return True, f"verified (host '{host_label}' matches acronym '{acr}')"
+        return True, f"verified (host '{host_label}' matches acronym '{acr}')", ms
 
     # B. page-token match
     if len(toks) >= 2:
@@ -265,31 +400,68 @@ def verify_url(url: str, name: str, city: str) -> tuple[bool, str]:
     else:
         accept = hits >= 1 and city_ok
     if accept:
-        return True, f"verified ({hits}/{len(toks)} name tokens" + (", city" if city_ok else "") + ")"
-    return False, f"name not found ({hits}/{len(toks)} tokens, city={'y' if city_ok else 'n'})"
+        return True, f"verified ({hits}/{len(toks)} name tokens" + (", city" if city_ok else "") + ")", ms
+    return False, f"name not found ({hits}/{len(toks)} tokens, city={'y' if city_ok else 'n'})", ms
 
 
-def process_row(name: str, city: str, state: str, guess: str) -> dict:
-    """Full per-row pipeline. Returns dict with confirmed_url + note + status."""
-    cands = web_search_candidates(name, city, state)
-    if not cands:
-        return {"confirmed_url": "", "status": "not_found",
-                "note": "no official site found; src=web-search"}
-
+def process_row(name: str, city: str, state: str, guess: str,
+                backend: str = "cloudflare") -> dict:
+    """Full per-row pipeline. Returns dict with confirmed_url + note + status +
+    browser_ms (+ openai_calls for cost accounting)."""
+    ms_total = 0
+    openai_calls = 0
     guess_n = norm_url(guess)
-    # Try candidates in order; prefer one matching the existing guess if present.
-    ordered = sorted(cands, key=lambda u: (norm_url(u) != guess_n))
-    for cand in ordered:
-        ok, reason = verify_url(cand, name, city)
-        if ok:
-            matches = norm_url(cand) == guess_n and bool(guess_n)
-            conf = "matches guess" if matches else ("differs from guess" if guess_n else "no prior guess")
-            return {"confirmed_url": cand, "status": "confirmed",
-                    "note": f"confirmed; {conf}; {reason}; src=web-search"}
 
-    # nothing verified — record the top candidate for a human, leave confirmed blank
-    return {"confirmed_url": "", "status": "found_unverified",
-            "note": f"candidate={ordered[0]} unverified ({reason}); src=web-search"}
+    # 1. Guess-first short-circuit: if there's an existing non-directory guess,
+    #    verify IT before spending a search. A correct guess costs one render.
+    if guess and not is_directory(guess):
+        cand = homepage(guess) or guess
+        ok, reason, ms = verify_url(cand, name, city)
+        ms_total += ms
+        if ok:
+            return {"confirmed_url": cand, "status": "confirmed", "browser_ms": ms_total,
+                    "openai_calls": 0,
+                    "note": f"confirmed; matches guess; {reason}; src=guess"}
+
+    # 2. Search for candidates via the chosen backend.
+    src = backend
+    if backend == "openai":
+        cands = web_search_candidates(name, city, state)
+        openai_calls += 1
+    else:  # cloudflare (default) or hybrid
+        cands, ms = cloudflare_search_candidates(name, city, state)
+        ms_total += ms
+        src = "ddg"
+        if not cands and backend == "hybrid":
+            cands = web_search_candidates(name, city, state)
+            openai_calls += 1
+            src = "openai-fallback"
+
+    if not cands:
+        return {"confirmed_url": "", "status": "not_found", "browser_ms": ms_total,
+                "openai_calls": openai_calls,
+                "note": f"no official site found; src={src}"}
+
+    # 3. Verify candidates, best-first; prefer one whose homepage matches the guess.
+    #    We render the FULL result URL (its path may carry the hospital name) but
+    #    write the clean homepage as the confirmed URL.
+    ordered = sorted(cands, key=lambda u: (norm_url(homepage(u)) != guess_n))
+    last_reason = ""
+    for cand in ordered[:3]:   # cap verify renders per row
+        ok, reason, ms = verify_url(cand, name, city)
+        ms_total += ms
+        last_reason = reason
+        if ok:
+            hp = homepage(cand) or cand
+            matches = norm_url(hp) == guess_n and bool(guess_n)
+            conf = "matches guess" if matches else ("differs from guess" if guess_n else "no prior guess")
+            return {"confirmed_url": hp, "status": "confirmed", "browser_ms": ms_total,
+                    "openai_calls": openai_calls,
+                    "note": f"confirmed; {conf}; {reason}; src={src}"}
+
+    return {"confirmed_url": "", "status": "found_unverified", "browser_ms": ms_total,
+            "openai_calls": openai_calls,
+            "note": f"candidate={homepage(ordered[0]) or ordered[0]} unverified ({last_reason}); src={src}"}
 
 
 # ── sheet plumbing for commands ───────────────────────────────────────────────
@@ -321,17 +493,38 @@ def cmd_estimate(args):
     c = _cols(hdr, args)
     todo = [r for r in data if _get(r, c["name"]) and (args.overwrite or not _get(r, c["confirmed"]))]
     n = len(todo)
-    print(json.dumps({
+    with_guess = sum(1 for r in todo if _get(r, c["guess"]) and not is_directory(_get(r, c["guess"])))
+    need_search = n - with_guess
+    backend = args.search_backend
+
+    out = {
         "tab": args.tab,
+        "backend": backend,
         "data_rows": len(data),
         "rows_with_name": sum(1 for r in data if _get(r, c["name"])),
         "already_confirmed": sum(1 for r in data if _get(r, c["confirmed"])),
         "rows_to_process": n,
-        "projected_web_searches": n,
-        "projected_renders": n,  # ≈1 verify render per row (best candidate)
-        "est_cost_usd": round(n * (COST_PER_SEARCH + COST_PER_RENDER), 2),
-        "note": "estimate only — no API calls made",
-    }, indent=2))
+        "rows_with_verifiable_guess": with_guess,
+        "rows_needing_search": need_search,
+    }
+    if backend == "openai":
+        out["projected_openai_searches"] = need_search
+        out["projected_renders"] = n  # 1 verify render/row
+        out["est_openai_usd"] = round(need_search * COST_PER_OPENAI_SEARCH, 2)
+        out["note"] = ("Cloudflare renders billed by duration (≈ free within the "
+                       "10 browser-hr/mo allowance); OpenAI search ≈ $0.012/call.")
+    else:
+        # cloudflare/hybrid: guess rows ≈ 1 render; search rows ≈ 1 search + ~1 verify
+        renders = with_guess + need_search * 2
+        out["projected_renders"] = renders
+        out["projected_browser_hours_at_4s_each"] = round(renders * 4 / 3600, 2)
+        hrs = renders * 4 / 3600
+        billable = max(0.0, hrs - CF_FREE_HOURS)
+        out["est_cloudflare_usd"] = round(billable * CF_USD_PER_HOUR, 2)
+        out["note"] = (f"Cloudflare billed by browser-time: {CF_FREE_HOURS} hrs/mo free, "
+                       f"then ${CF_USD_PER_HOUR}/hr. Estimate assumes ~4s/render; the "
+                       "test batch measures real X-Browser-Ms-Used. No OpenAI spend.")
+    print(json.dumps(out, indent=2))
 
 
 def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
@@ -350,15 +543,18 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
         todo = todo[:args.n]
 
     total = len(todo)
-    print(f"Processing {total} rows (concurrency={args.concurrency}, write={write})…", flush=True)
+    backend = args.search_backend
+    print(f"Processing {total} rows (backend={backend}, concurrency={args.concurrency}, write={write})…", flush=True)
     results = {}
     done = 0
     stats = {"confirmed": 0, "found_unverified": 0, "not_found": 0}
+    tot_ms = 0
+    tot_openai = 0
 
     def work(item):
         idx, row = item
         out = process_row(_get(row, c["name"]), _get(row, c["city"]),
-                          _get(row, c["state"]), _get(row, c["guess"]))
+                          _get(row, c["state"]), _get(row, c["guess"]), backend=backend)
         return idx, row, out
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
@@ -367,6 +563,8 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
             idx, row, out = fut.result()
             results[idx] = out
             stats[out["status"]] = stats.get(out["status"], 0) + 1
+            tot_ms += out.get("browser_ms", 0)
+            tot_openai += out.get("openai_calls", 0)
             done += 1
             name = _get(row, c["name"])
             row_1based = idx + 2  # +1 header, +1 to 1-based
@@ -385,7 +583,18 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
             print(f"  [{done}/{total}] {tag:16} {name[:42]:42} -> "
                   f"{out['confirmed_url'] or '(blank)'}", flush=True)
 
-    print("\n" + json.dumps({"processed": total, **stats}, indent=2))
+    # Real cost from measured browser-time (+ any OpenAI fallback calls).
+    hrs = tot_ms / 3_600_000
+    cost = {
+        "browser_ms_total": tot_ms,
+        "browser_hours": round(hrs, 3),
+        "browser_hours_per_row": round(hrs / total, 4) if total else 0,
+        "projected_full_run_hours_1017": round(hrs / total * 1017, 2) if total else 0,
+        "cloudflare_usd_if_over_free_tier": round(hrs * CF_USD_PER_HOUR, 4),
+        "openai_calls": tot_openai,
+        "openai_usd": round(tot_openai * COST_PER_OPENAI_SEARCH, 3),
+    }
+    print("\n" + json.dumps({"processed": total, **stats, "cost": cost}, indent=2))
     return results
 
 
@@ -423,6 +632,11 @@ def main():
         p.add_argument("--concurrency", type=int, default=8)
         p.add_argument("--limit", type=int, default=0)
         p.add_argument("--overwrite", action="store_true")
+        p.add_argument("--search-backend", choices=["cloudflare", "openai", "hybrid"],
+                       default="cloudflare",
+                       help="cloudflare = DuckDuckGo render (near-free); "
+                            "openai = web_search tool ($0.012/call); "
+                            "hybrid = cloudflare then openai fallback.")
 
     e = sub.add_parser("estimate", help="row count + projected calls/cost (no API)")
     common(e)

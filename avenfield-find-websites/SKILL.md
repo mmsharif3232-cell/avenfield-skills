@@ -23,20 +23,38 @@ false negative (right URL left in notes).
 ## Pipeline position
 `(list of org names) → find-websites → [render/qualify/verify/upload]`
 
+## Search backends (`--search-backend`)
+Discovery can come from either source — pick on cost:
+- **`cloudflare`** (default, near-free) — render a **DuckDuckGo HTML** results page
+  via Cloudflare and extract the organic links. Cloudflare is billed by browser
+  *time* ($0.09/hr, **10 hrs/mo free**), so a full 1,000-row run ≈ 1.5 browser-hrs
+  → **~$0**. No OpenAI spend.
+- **`openai`** — OpenAI Responses API `web_search` tool. Higher precision on
+  tricky names, but **$10/1k calls (~$0.012/row)**.
+- **`hybrid`** — Cloudflare first; OpenAI only for rows the rendered search page
+  can't resolve. Best accuracy-per-dollar.
+
+Both feed the same render-verify guard, so a wrong candidate is never confirmed.
+The **guess-first short-circuit** verifies an existing `auto_best_guess` before
+spending any search — a correct guess costs one render.
+
 ## Commands
 ```bash
 F=~/.claude/skills/avenfield-find-websites/find_websites.py
 
-# 1. estimate — row count + projected web-search/render calls + $ (NO API calls)
-python3 $F estimate --sheet <ID> --tab VA_Worklist
+# 1. estimate — rows + projected renders/browser-hours + $ (NO API calls)
+python3 $F estimate --sheet <ID> --tab VA_Worklist [--search-backend cloudflare]
 
-# 2. test — run the full pipeline on N rows, print a results table, WRITE NOTHING
-python3 $F test --sheet <ID> --tab VA_Worklist --n 15
+# 2. test — run the full pipeline on N rows, print results + MEASURED browser-ms,
+#    WRITE NOTHING
+python3 $F test --sheet <ID> --tab VA_Worklist --n 25 [--search-backend cloudflare]
 
 # 3. run — full pass: writes confirmed_url + va_notes, idempotent, concurrent
 python3 $F run --sheet <ID> --tab VA_Worklist [--limit N] [--overwrite] \
-      [--status-cell T1]
+      [--search-backend cloudflare] [--status-cell T1]
 ```
+`test`/`run` print real cost from the `X-Browser-Ms-Used` header (browser-hours +
+projected full-run hours), so the bill is measured, not guessed.
 
 ### Column mapping (defaults match the VA_Worklist layout)
 `--name-col hospital_name --city-col city --state-col state --guess-col auto_best_guess --confirmed-col confirmed_url --notes-col va_notes`
@@ -64,6 +82,21 @@ Statuses written to `va_notes`:
 | `not_found` | **blank** | `no official site found; src=web-search` |
 
 ## Hard-won lessons (baked in)
+- **DuckDuckGo HTML renders cleanly; Bing/Google don't.** `html.duckduckgo.com/html/`
+  returns plain organic links (wrapped in `/l/?uddg=` redirects — decode them) and
+  its #1 result is usually the official site. Bing returned only JS junk via the
+  `links` endpoint. So the Cloudflare backend targets DuckDuckGo.
+- **Verify the deep result URL, write the homepage.** A health-system hospital's
+  DDG result is often a deep link (`phhealthcare.org/locations/huntingdon`) whose
+  page carries the specific name — so it verifies where the bare system homepage
+  wouldn't. Render the full URL, confirm, then store `homepage()` as confirmed.
+- **Directory aggregators are the main false-positive risk.** Sites like
+  `hospitalsandclinics.net`, `opennpi.com`, `pa211.org`, and `.edu` colleges that
+  share the hospital's name will *pass* a name-on-page check. They're blocklisted
+  (incl. all `.edu`/`.gov` — this list is community/CAH hospitals, not universities).
+  Expect a long tail; add new aggregators to `DIRECTORY_HOSTS` as they appear.
+- **`X-Browser-Ms-Used` is a float string.** Parse it with `float()` then round —
+  `int()` throws on `'1384.10'` and silently fails every render.
 - **Web search ≠ official site.** Searches love to return Google Maps, Facebook,
   Healthgrades. The directory/social blocklist + "their own domain" prompt strip
   those; the render-verify proves what's left.
