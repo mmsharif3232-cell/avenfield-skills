@@ -592,8 +592,15 @@ def process_row(name: str, city: str, state: str, guess: str,
         grounded = any(homepage(u) == pick for u, _ in raw)
         matches = norm_url(pick) == guess_n and bool(guess_n)
         gc = "matches guess" if matches else ("differs from guess" if guess_n else "no prior guess")
-        # Strongest signal: the hospital name actually renders on the page (try the
-        # homepage and the deep DDG URL behind it). Tried, but NOT required.
+        # FAST PATH: a grounded high/medium pick is confirmed WITHOUT spending verify
+        # renders (the pick is a real URL from the search + GPT reasoned over titles;
+        # big hospital sites bot-block the renderer so an on-page check is unreliable).
+        if grounded and conf in ("high", "medium"):
+            base["browser_ms"] = ms_total
+            return {**base, "confirmed_url": pick, "status": "confirmed",
+                    "note": f"confirmed; gpt-pick {conf} (grounded); {gc}; {why}; src=gpt"}
+        # UNCERTAIN (low confidence or ungrounded): require an on-page render match
+        # before confirming — try the homepage and the deep DDG URL behind it.
         targets = [pick] + [u for u, _ in raw if homepage(u) == pick and u != pick]
         on_page = False
         for tgt in targets[:2]:
@@ -606,9 +613,6 @@ def process_row(name: str, city: str, state: str, guess: str,
         if on_page:
             return {**base, "confirmed_url": pick, "status": "confirmed",
                     "note": f"confirmed; gpt-pick {conf}; {gc}; on-page {vreason}; src=gpt"}
-        if grounded and conf in ("high", "medium"):
-            return {**base, "confirmed_url": pick, "status": "confirmed",
-                    "note": f"confirmed; gpt-pick {conf} (grounded, render-blocked); {gc}; {why}; src=gpt"}
         return {**base, "confirmed_url": "", "status": "found_unverified",
                 "note": f"candidate={pick} gpt-pick {conf} (ungrounded/low: {why}); src=gpt"}
 
@@ -778,7 +782,7 @@ def _run_batch(sheet_id, tab, hdr, data, c, args, write: bool):
             row_1based = idx + 2  # +1 header, +1 to 1-based
             if write:
                 pending.append((row_1based, out["confirmed_url"], out["note"]))
-                if len(pending) >= 40:        # flush in batches
+                if len(pending) >= getattr(args, "flush_every", 10):   # real-time batched flush
                     flush()
                     if args.status_cell:
                         try:
@@ -832,6 +836,57 @@ def cmd_run(args):
           f"va_notes (col {idx_to_col(c['notes'])}).")
 
 
+def cmd_trace(args):
+    """Run ONE row and print the raw output of every step (writes nothing).
+    Lets you verify the exact DDG→GPT→verify→decision flow before a full run."""
+    name, city, state, guess = args.name, args.city or "", args.state or "", args.guess or ""
+    print(f"=== TRACE: {name!r}  ({city}, {state})  guess={guess or '(none)'} ===\n")
+
+    # Step 1: guess-first (only if a guess was supplied)
+    if guess and not is_directory(guess):
+        cand = homepage(guess) or guess
+        ok, reason, ms = verify_url(cand, name, city)
+        print(f"[1] guess-first: render-verify {cand}  -> ok={ok} ({reason}) [{ms}ms]")
+        if ok:
+            print(f"\nRESULT: confirmed_url={cand}\n        note=confirmed; matches guess; {reason}; src=guess")
+            return
+    else:
+        print("[1] guess-first: no usable guess — skipped")
+
+    # Step 2: Cloudflare → DuckDuckGo
+    q = " ".join(p for p in (name, city, state) if p).strip()
+    print(f"\n[2] Cloudflare 'links' on: {DDG_HTML}{urllib.parse.quote(q)}")
+    raw, ms = cloudflare_search_raw(name, city, state)
+    print(f"    browser-ms={ms}; {len(raw)} candidate(s) after decode+directory-filter:")
+    for i, (u, t) in enumerate(raw):
+        print(f"      {i+1}. {u}\n         title: {t[:90]!r}")
+
+    # Step 3: GPT pick
+    pick, why, conf, (gin, gout) = gpt_pick_website(name, city, state, raw)
+    print(f"\n[3] gpt-5-mini pick: {pick or '(empty)'}  conf={conf}  why={why!r}")
+    print(f"    tokens: in={gin} out={gout}  (~${gin/1e6*GPT_IN_PER_1M + gout/1e6*GPT_OUT_PER_1M:.5f})")
+    if not pick:
+        print("\nRESULT: not_found (gpt returned no official site)")
+        return
+
+    # Step 4: grounding + verify decision
+    grounded = any(homepage(u) == pick for u, _ in raw)
+    print(f"\n[4] grounded? {grounded}  (homepage of pick appears in the DDG results)")
+    if grounded and conf in ("high", "medium"):
+        print("    decision: grounded + high/medium → CONFIRM (fast path, no verify render)")
+        print(f"\nRESULT: confirmed_url={pick}\n        note=confirmed; gpt-pick {conf} (grounded); src=gpt")
+        return
+    print("    decision: uncertain → require on-page render match")
+    targets = [pick] + [u for u, _ in raw if homepage(u) == pick and u != pick]
+    for tgt in targets[:2]:
+        ok, vreason, m = verify_url(tgt, name, city)
+        print(f"      render-verify {tgt[:70]} -> ok={ok} ({vreason}) [{m}ms]")
+        if ok:
+            print(f"\nRESULT: confirmed_url={pick}\n        note=confirmed; gpt-pick {conf}; on-page {vreason}; src=gpt")
+            return
+    print(f"\nRESULT: found_unverified (blank); candidate={pick} noted for review")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Find & verify an org's official website (web search + render-verify).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -845,9 +900,12 @@ def main():
         p.add_argument("--guess-col", default="auto_best_guess")
         p.add_argument("--confirmed-col", default="confirmed_url")
         p.add_argument("--notes-col", default="va_notes")
-        p.add_argument("--concurrency", type=int, default=8)
+        p.add_argument("--concurrency", type=int, default=10)
         p.add_argument("--limit", type=int, default=0)
         p.add_argument("--overwrite", action="store_true")
+        p.add_argument("--flush-every", type=int, default=10,
+                       help="write to the sheet every N rows (real-time; default 10, "
+                            "kept under Google's ~60 writes/min/user quota).")
         p.add_argument("--search-backend", choices=["gpt", "cloudflare", "openai", "hybrid"],
                        default="gpt",
                        help="gpt (default) = DuckDuckGo render + gpt-5-mini picks the "
@@ -870,6 +928,13 @@ def main():
     r.add_argument("--n", type=int, default=0)
     r.add_argument("--status-cell", help="optional A1 cell for a live progress ticker")
     r.set_defaults(func=cmd_run)
+
+    tr = sub.add_parser("trace", help="run ONE hospital and print every step's raw output (no write)")
+    tr.add_argument("--name", required=True)
+    tr.add_argument("--city", default="")
+    tr.add_argument("--state", default="")
+    tr.add_argument("--guess", default="")
+    tr.set_defaults(func=cmd_trace)
 
     args = ap.parse_args()
     args.func(args)

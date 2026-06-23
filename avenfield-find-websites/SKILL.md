@@ -53,6 +53,10 @@ directory blocklist keep it from inventing or picking news/directory sites.
 ```bash
 F=~/.claude/skills/avenfield-find-websites/find_websites.py
 
+# 0. trace — run ONE hospital and PRINT every step's raw output (no write).
+#    Verify the DDG→GPT→grounding→verify→decision flow before a full run.
+python3 $F trace --name "INDIANA UNIVERSITY HEALTH FRANKFORT INC" --city FRANKFORT --state IN
+
 # 1. estimate — rows + projected renders/browser-hours + $ (NO API calls)
 python3 $F estimate --sheet <ID> --tab VA_Worklist [--search-backend cloudflare]
 
@@ -62,8 +66,13 @@ python3 $F test --sheet <ID> --tab VA_Worklist --n 25 [--search-backend cloudfla
 
 # 3. run — full pass: writes confirmed_url + va_notes, idempotent, concurrent
 python3 $F run --sheet <ID> --tab VA_Worklist [--limit N] [--overwrite] \
-      [--search-backend cloudflare] [--status-cell T1]
+      [--search-backend gpt] [--concurrency 10] [--flush-every 10] [--status-cell T1]
 ```
+- **Speed:** `--concurrency` default 10; grounded high/medium GPT picks confirm
+  WITHOUT a verify render (the slow part), so a ~1,000-row run is ~30 min, ~$0.27.
+- **Real-time:** `--flush-every` (default 10) writes the sheet every 10 rows in one
+  batched request — the sheet fills live and stays under Google's write quota.
+
 `test`/`run` print real cost from the `X-Browser-Ms-Used` header (browser-hours +
 projected full-run hours), so the bill is measured, not guessed.
 
