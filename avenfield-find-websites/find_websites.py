@@ -379,6 +379,71 @@ def gpt_pick_website(name, city, state, cands):
     return hp, (why or "gpt pick"), conf, usage
 
 
+def gpt_verify_official(name, city, state, url, page_content):
+    """Decide whether `url` is the hospital's OFFICIAL website from its rendered page.
+
+    The hard case: large health systems (adventhealth.com, bannerhealth.com) and
+    government operators (ihs.gov) run MANY hospitals on one domain — those sub-pages
+    ARE official. Third-party directories (healthgrades, zocdoc) merely LIST the
+    hospital — NOT official. GPT reads the rendered page and the URL to tell them apart.
+
+    Returns (is_official: bool|None, confidence: 'high|medium|low', reason, (gin, gout)).
+    is_official is None when GPT can't decide (-> 'Uncertain')."""
+    page = (page_content or "")[:6000]   # cap tokens; the top of the page is enough
+    prompt = (
+        "You verify whether a URL is the OFFICIAL website of a specific U.S. hospital.\n\n"
+        f"Hospital: {name}\nCity/State: {city}, {state}\nURL being checked: {url}\n\n"
+        f"Rendered page content (markdown, truncated):\n---\n{page}\n---\n\n"
+        "Decide: is this URL the hospital's official website?\n"
+        "- OFFICIAL = the organization behind this domain OPERATES or directly owns this\n"
+        "  hospital. This INCLUDES a parent health system's site (e.g. a hospital owned by\n"
+        "  AdventHealth on adventhealth.com) and a government operator that runs the\n"
+        "  facility (e.g. Indian Health Service on ihs.gov, VA on va.gov). A sub-page of\n"
+        "  the operating system that names THIS hospital counts as official.\n"
+        "- NOT OFFICIAL = a third-party directory/aggregator that merely LISTS the hospital\n"
+        "  (healthgrades.com, zocdoc.com, vitals.com, usnews.com, yelp, npi lookups), a\n"
+        "  news/social/jobs page, or a page about a DIFFERENT hospital/org than the one named.\n"
+        "- If the page failed to render or is too sparse to tell, is_official=null, low.\n\n"
+        "Return STRICT JSON only: {\"is_official\": true|false|null, "
+        "\"confidence\": \"high|medium|low\", \"reason\": \"<=15 words\"}"
+    )
+    body = {"model": GPT_PICK_MODEL, "reasoning_effort": "low",
+            "messages": [{"role": "user", "content": prompt}]}
+    status, data = 0, {}
+    for attempt in range(3):
+        try:
+            status, data = ai.call("/chat/completions", body=body, timeout=90)
+            if status == 200:
+                break
+        except (Exception, SystemExit):
+            status, data = 0, {}
+        if attempt < 2:
+            time.sleep(1.5 * (attempt + 1))
+    usage = (0, 0)
+    if status != 200:
+        return None, "low", f"gpt error {status}", usage
+    u = data.get("usage", {})
+    usage = (u.get("prompt_tokens", 0), u.get("completion_tokens", 0))
+    content = ""
+    try:
+        content = data["choices"][0]["message"]["content"] or ""
+    except Exception:
+        pass
+    is_off, conf, reason = None, "low", "gpt returned no verdict"
+    m = re.search(r"\{.*\}", content, re.DOTALL)
+    if m:
+        try:
+            j = json.loads(m.group(0))
+            is_off = j.get("is_official", None)   # may be true/false/null
+            conf = (j.get("confidence") or "low").strip().lower()
+            reason = (j.get("reason") or "").strip()[:120] or "no reason given"
+        except Exception:
+            pass
+    if conf not in ("high", "medium", "low"):
+        conf = "low"
+    return is_off, conf, reason, usage
+
+
 def acronym(name: str) -> str:
     """Initials of the org name (skip filler like jr/of/the). 'D W McMillan
     Memorial Hospital' -> 'dwmmh'; 'South Arkansas Regional Hospital' -> 'sarh'."""
@@ -491,6 +556,33 @@ def process_row(name: str, city: str, state: str, guess: str) -> dict:
                 "note": f"confirmed; gpt-pick {conf}; {gc}; on-page {vreason}; src=gpt"}
     return {**base, "confirmed_url": "", "status": "found_unverified",
             "note": f"candidate={pick} gpt-pick {conf} (ungrounded/low: {why}); src=gpt"}
+
+
+def _label(is_off):
+    """Map GPT's true/false/null verdict to the sheet's Yes/No/Uncertain label."""
+    if is_off is True:
+        return "Yes"
+    if is_off is False:
+        return "No"
+    return "Uncertain"
+
+
+def verify_official_row(name, city, state, url_to_check, render_url):
+    """Render render_url and ask GPT whether url_to_check is the hospital's official
+    site. Returns dict: is_official(label)/confidence/reason/browser_ms/gpt_in/gpt_out.
+    No domain-cache here — caching is handled by cmd_verify so it stays thread-safe."""
+    ok, status, md, ms = cf_render_ms("markdown", {"url": render_url}, timeout=60, retries=2)
+    if not ok or not md or md.startswith("[render"):
+        # Render failed — let GPT still try on an empty page (it will return low/uncertain),
+        # but most of the time a dead URL → No/Uncertain with a clear reason.
+        is_off, conf, reason, (gin, gout) = gpt_verify_official(name, city, state, url_to_check, "")
+        if is_off is None:
+            reason = f"page did not render ({status}); {reason}"
+        return {"is_official": _label(is_off), "confidence": conf.capitalize(),
+                "reason": reason, "browser_ms": ms, "gpt_in": gin, "gpt_out": gout}
+    is_off, conf, reason, (gin, gout) = gpt_verify_official(name, city, state, url_to_check, md)
+    return {"is_official": _label(is_off), "confidence": conf.capitalize(),
+            "reason": reason, "browser_ms": ms, "gpt_in": gin, "gpt_out": gout}
 
 
 # ── sheet plumbing for commands ───────────────────────────────────────────────
@@ -692,6 +784,180 @@ def cmd_run(args):
           f"va_notes (col {idx_to_col(c['notes'])}).")
 
 
+def cmd_verify(args):
+    """Verify each row's confirmed URL is the hospital's OFFICIAL website.
+
+    Per row: pick the URL to evaluate (Manual Confirmed wins over confirmed_url),
+    render it (prefer a same-domain auto_best_guess sub-page — richer for matching),
+    ask GPT 'does this org operate this hospital?'. Writes is_official / confidence /
+    reason. Renders are deduped per homepage domain (a verdict on the FIRST hospital
+    on a shared system domain is reused for the rest, with a note)."""
+    import threading
+    sheet_id = sh._sheet_id(args.sheet)
+    hdr, data = _load(sheet_id, args.tab)
+
+    ci = {
+        "name": resolve_col(args.name_col, hdr),
+        "city": resolve_col(args.city_col, hdr),
+        "state": resolve_col(args.state_col, hdr),
+        "guess": resolve_col(args.guess_col, hdr),
+        "confirmed": resolve_col(args.confirmed_col, hdr),
+        "manual": resolve_col(args.manual_col, hdr),
+    }
+    # Output columns: resolve by header if it already exists, else by the given letter.
+    def _out_col(spec):
+        low = [h.strip().lower() for h in hdr]
+        if spec.lower() in low:
+            return low.index(spec.lower())
+        if re.fullmatch(r"[A-Za-z]+", spec):
+            return col_to_idx(spec)
+        raise SystemExit(f"Bad output column {spec!r}")
+    oc = {
+        "official": _out_col(args.official_col),
+        "conf": _out_col(args.conf_col),
+        "reason": _out_col(args.reason_col),
+    }
+
+    # Write the header labels once (idempotent — overwrites whatever's there).
+    sh._api("POST", f"{sh.SHEETS}/{sheet_id}/values:batchUpdate", {
+        "valueInputOption": "RAW",
+        "data": [
+            {"range": _range_body(args.tab, f"{idx_to_col(oc['official'])}1"), "values": [["is_official"]]},
+            {"range": _range_body(args.tab, f"{idx_to_col(oc['conf'])}1"), "values": [["verify_confidence"]]},
+            {"range": _range_body(args.tab, f"{idx_to_col(oc['reason'])}1"), "values": [["verify_reason"]]},
+        ],
+    })
+
+    start = getattr(args, "start", 0) or 0
+    todo = []
+    for i, r in enumerate(data):
+        if i < start:
+            continue
+        name = _get(r, ci["name"])
+        if not name:
+            continue
+        url_to_check = _get(r, ci["manual"]) or _get(r, ci["confirmed"])
+        if not url_to_check:
+            continue
+        if not args.overwrite and _get(r, oc["official"]):
+            continue   # idempotent: skip rows already verified
+        todo.append((i, r, url_to_check))
+    if args.limit:
+        todo = todo[:args.limit]
+    if getattr(args, "n", 0):
+        todo = todo[:args.n]
+
+    total = len(todo)
+    print(f"Verifying {total} rows (concurrency={args.concurrency})…", flush=True)
+
+    cache = {}            # homepage-domain -> (result_dict, first_hospital_name)
+    cache_lock = threading.Lock()
+    pending = []          # (row_1based, official, conf, reason)
+    pend_lock = threading.Lock()
+    stats = {"Yes": 0, "No": 0, "Uncertain": 0}
+    tot = {"ms": 0, "calls": 0, "gin": 0, "gout": 0}
+    done = 0
+
+    def flush():
+        with pend_lock:
+            if not pending:
+                return
+            batch = list(pending)
+            pending.clear()
+        oo, occ, orr = idx_to_col(oc["official"]), idx_to_col(oc["conf"]), idx_to_col(oc["reason"])
+        ranges = []
+        for r1, off, cf, rs in batch:
+            ranges.append({"range": _range_body(args.tab, f"{oo}{r1}"), "values": [[off]]})
+            ranges.append({"range": _range_body(args.tab, f"{occ}{r1}"), "values": [[cf]]})
+            ranges.append({"range": _range_body(args.tab, f"{orr}{r1}"), "values": [[rs]]})
+        for attempt in range(5):
+            try:
+                sh._api("POST", f"{sh.SHEETS}/{sheet_id}/values:batchUpdate",
+                        {"valueInputOption": "RAW", "data": ranges})
+                break
+            except (Exception, SystemExit) as e:
+                if "429" in str(e) and attempt < 4:
+                    time.sleep(2 ** attempt * 2)
+                    continue
+                raise
+
+    def work(item):
+        idx, row, url_to_check = item
+        name = _get(row, ci["name"])
+        city = _get(row, ci["city"])
+        state = _get(row, ci["state"])
+        guess = _get(row, ci["guess"])
+        dom = homepage(url_to_check)
+        # prefer a same-domain guess sub-page for the render (more specific page)
+        render_url = url_to_check
+        if guess and homepage(guess) == dom and norm_url(guess) != norm_url(url_to_check):
+            render_url = guess
+
+        # Domain dedupe: reuse the verdict for the first hospital seen on this domain.
+        if dom:
+            with cache_lock:
+                cached = cache.get(dom)
+            if cached is not None:
+                res0, first_name = cached
+                res = dict(res0)
+                res["reason"] = f"{res0['reason']}; same domain as {first_name}"
+                res["browser_ms"] = 0
+                res["gpt_in"] = 0
+                res["gpt_out"] = 0
+                res["_cached"] = True
+                return idx, row, url_to_check, res
+
+        try:
+            res = verify_official_row(name, city, state, url_to_check, render_url)
+        except (Exception, SystemExit) as e:
+            res = {"is_official": "Uncertain", "confidence": "Low",
+                   "reason": f"verify error ({str(e)[:80]})", "browser_ms": 0,
+                   "gpt_in": 0, "gpt_out": 0}
+        if dom and not res.get("reason", "").startswith("verify error"):
+            with cache_lock:
+                cache.setdefault(dom, (res, name))
+        return idx, row, url_to_check, res
+
+    with ThreadPoolExecutor(max_workers=args.concurrency) as ex:
+        futs = [ex.submit(work, it) for it in todo]
+        for fut in as_completed(futs):
+            idx, row, url_to_check, res = fut.result()
+            stats[res["is_official"]] = stats.get(res["is_official"], 0) + 1
+            tot["ms"] += res.get("browser_ms", 0)
+            if not res.get("_cached"):
+                tot["calls"] += 1
+            tot["gin"] += res.get("gpt_in", 0)
+            tot["gout"] += res.get("gpt_out", 0)
+            done += 1
+            row_1based = idx + 2
+            with pend_lock:
+                pending.append((row_1based, res["is_official"], res["confidence"], res["reason"]))
+                buffered = len(pending)
+            if buffered >= getattr(args, "flush_every", 10):
+                flush()
+            name = _get(row, ci["name"])
+            print(f"  [{done}/{total}] {res['is_official']:9} {res['confidence']:7} "
+                  f"{name[:34]:34} {url_to_check[:38]}", flush=True)
+
+    flush()
+
+    hrs = tot["ms"] / 3_600_000
+    gpt_usd = tot["gin"] / 1_000_000 * GPT_IN_PER_1M + tot["gout"] / 1_000_000 * GPT_OUT_PER_1M
+    cost = {
+        "unique_domains_rendered": len(cache),
+        "browser_ms_total": tot["ms"],
+        "browser_hours": round(hrs, 3),
+        "gpt_calls": tot["calls"],
+        "gpt_tokens_in": tot["gin"],
+        "gpt_tokens_out": tot["gout"],
+        "gpt_usd": round(gpt_usd, 4),
+    }
+    print("\n" + json.dumps({"processed": total, **stats, "cost": cost}, indent=2))
+    print(f"\nWrote is_official (col {idx_to_col(oc['official'])}) / "
+          f"verify_confidence (col {idx_to_col(oc['conf'])}) / "
+          f"verify_reason (col {idx_to_col(oc['reason'])}).")
+
+
 def cmd_trace(args):
     """Run ONE row and print the raw output of every step (writes nothing).
     Lets you verify the exact DDG→GPT→verify→decision flow before a full run."""
@@ -780,6 +1046,18 @@ def main():
     r.add_argument("--n", type=int, default=0)
     r.add_argument("--status-cell", help="optional A1 cell for a live progress ticker")
     r.set_defaults(func=cmd_run)
+
+    v = sub.add_parser("verify", help="verify each row's confirmed URL is the hospital's OFFICIAL site")
+    common(v)
+    v.add_argument("--n", type=int, default=0)
+    v.add_argument("--manual-col", default="Manual Confirmed",
+                   help="column holding the user-corrected URL (wins over confirmed_url)")
+    # Output columns: default to the empty Y/Z/AA on this sheet. Accept a header
+    # name too (so a re-run can target the already-labelled columns by name).
+    v.add_argument("--official-col", default="Y")
+    v.add_argument("--conf-col", default="Z")
+    v.add_argument("--reason-col", default="AA")
+    v.set_defaults(func=cmd_verify)
 
     tr = sub.add_parser("trace", help="run ONE hospital and print every step's raw output (no write)")
     tr.add_argument("--name", required=True)
