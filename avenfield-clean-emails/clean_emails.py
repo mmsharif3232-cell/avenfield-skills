@@ -378,10 +378,23 @@ def cmd_clean(args):
     email_vals: list[list[str]] = []   # one cell per data row
     status_vals: list[list[str]] = []
     changed = 0
+    seen: set[str] = set()  # for --dedup
 
     for r in rows[1:]:
         raw = r[email_i] if len(r) > email_i else ""
         cleaned, status = clean_email(raw)
+
+        # Deduplication: blank the email and mark status for subsequent copies.
+        if args.dedup and cleaned:
+            key = cleaned.lower()
+            if key in seen:
+                counts["duplicate"] = counts.get("duplicate", 0) + 1
+                email_vals.append([""])
+                status_vals.append(["duplicate"])
+                changed += 1
+                continue
+            seen.add(key)
+
         counts[status] = counts.get(status, 0) + 1
         if cleaned != (raw or "").strip():
             changed += 1
@@ -393,6 +406,7 @@ def cmd_clean(args):
     summary = {
         "tab": args.tab,
         "data_rows": len(rows) - 1,
+        "dedup": args.dedup,
         "status_breakdown": dict(sorted(counts.items(), key=lambda kv: -kv[1])),
         "cells_changed": changed,
         "email_col": idx_to_col(email_i),
@@ -516,6 +530,9 @@ def main():
     c.add_argument("--status-col", help="optional status column letter or header name")
     c.add_argument("--chunk", type=int, default=500)
     c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--dedup", action="store_true",
+                   help="blank duplicate emails in-place and set status=duplicate "
+                        "(keeps the first occurrence, removes subsequent copies)")
     c.set_defaults(func=cmd_clean)
 
     e = sub.add_parser("extract", help="clean + filter + dedup → write to dest tab")
