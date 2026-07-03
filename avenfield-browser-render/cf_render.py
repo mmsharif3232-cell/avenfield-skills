@@ -53,10 +53,14 @@ import base64
 import json
 import os
 import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import urllib.request
 import urllib.error
+
+TRANSIENT = {429, 500, 502, 503, 504}
 
 API_BASE = "https://api.cloudflare.com/client/v4/accounts"
 BINARY_ENDPOINTS = {"screenshot", "pdf"}
@@ -109,6 +113,41 @@ def render(endpoint: str, payload: dict, timeout: float = 90.0) -> tuple[int, by
         return e.code, e.read(), e.headers.get("Content-Type", "")
 
 
+def render_text(endpoint: str, payload: dict, timeout: float = 90.0,
+                retries: int = 2):
+    """Render a text/JSON endpoint with retries; return (ok, status, result).
+
+    `result` is always a string (markdown/HTML as-is; JSON results dumped).
+    On failure it's a short ``[render failed ...]`` / ``[render error ...]``
+    marker so a downstream cell is never silently empty.
+    """
+    last = (False, 0, "[render error: unknown]")
+    for attempt in range(retries + 1):
+        try:
+            status, body, _ = render(endpoint, payload, timeout)
+        except Exception as e:  # network / timeout — retry transiently
+            last = (False, 0, f"[render error: {e}]")
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            return last
+        text = body.decode("utf-8", "replace")
+        if status == 200:
+            try:
+                res = json.loads(text).get("result")
+            except (json.JSONDecodeError, AttributeError):
+                res = text
+            if not isinstance(res, str):
+                res = json.dumps(res, ensure_ascii=False)
+            return (True, status, res)
+        last = (False, status, f"[render failed {status}: {text[:200]}]")
+        if status in TRANSIENT and attempt < retries:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        return last
+    return last
+
+
 def _emit(endpoint: str, status: int, body: bytes, ctype: str, out: str | None):
     if endpoint in BINARY_ENDPOINTS:
         # Cloudflare may return raw bytes or a JSON envelope with base64.
@@ -145,6 +184,8 @@ def main():
     ap.add_argument("--out", help="For screenshot/pdf: write binary here.")
     ap.add_argument("--batch", action="store_true",
                     help="Read URLs from stdin (one per line); JSONL out.")
+    ap.add_argument("--concurrency", type=int, default=6,
+                    help="Parallel renders in --batch mode (default 6).")
     ap.add_argument("--timeout", type=float, default=90.0)
     args = ap.parse_args()
 
@@ -154,19 +195,18 @@ def main():
         sys.exit(f"--body is not valid JSON: {e}")
 
     if args.batch:
-        for line in sys.stdin:
-            u = line.strip()
-            if not u:
-                continue
-            payload = {**base_body, "url": u}
-            status, body, ctype = render(args.endpoint, payload, args.timeout)
-            text = body.decode("utf-8", "replace")
-            try:
-                res = json.loads(text).get("result")
-            except json.JSONDecodeError:
-                res = text
-            print(json.dumps({"url": u, "status": status, "result": res},
-                             ensure_ascii=False))
+        urls = [ln.strip() for ln in sys.stdin if ln.strip()]
+        workers = max(1, args.concurrency)
+
+        def one(u):
+            ok, status, res = render_text(
+                args.endpoint, {**base_body, "url": u}, args.timeout)
+            return {"url": u, "ok": ok, "status": status, "result": res}
+
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            # map preserves input order; results stream out in order
+            for rec in ex.map(one, urls):
+                print(json.dumps(rec, ensure_ascii=False))
         return
 
     payload = dict(base_body)

@@ -11,9 +11,17 @@ pipeline. You ask in plain English; Claude runs the skill.
 |-------|-----------|
 | `avenfield-browser-render` | Render / scrape / screenshot / extract any site via Cloudflare Browser Rendering (markdown, HTML, screenshot, PDF, structured JSON, element scrape, links — single or batch) |
 | `avenfield-verify` | Verify email deliverability via OmniVerifier (valid / catch-all / invalid / disposable / role) |
-| `avenfield-instantly` | Drive Instantly v2 — list campaigns, add leads, push sequences, or any endpoint (generic passthrough) |
+| `avenfield-instantly` | Drive Instantly v2 — list campaigns, add leads (single or bulk via `push-leads`), push sequences, or any endpoint (generic passthrough) |
 | `avenfield-sheets` | Read/write any Google Sheet via the service-account JSON (share the sheet with the SA email) |
 | `avenfield-openai` | Full OpenAI access — raw passthrough to any /v1 endpoint + `chat` and `extract` (single + batch) |
+| `avenfield-personalize` | Generate cold-email merge variables ({{serviceLine}}…) from scraped website data — saved prompt presets, test-first, cost estimate before the full run, live progress, map back into the main sheet |
+| `avenfield-qualify` | Qualify a lead list against an ICP from scraped website content (classify → is_ma/type/confidence/reason via personalize + a preset), then extract only the winning lead rows into a new tab (matched by URL, carrying the verdict columns) |
+| `avenfield-clean-emails` | Deterministically clean a scraped email column (no GPT) — URL-decode (`%20`), strip zero-width/underscore/dash prefixes, unglue markdown links + phone numbers, repair doubled TLDs, block placeholder/supplier/SMS-gateway domains; writes a per-row status |
+| `avenfield-find-websites` | Find an org's real official website from name + location — OpenAI web search for candidates, drop directories/social, then render-verify (name/city on page or host-acronym match) before writing `confirmed_url` + a status note; estimate/test/run, idempotent |
+| `avenfield-instantly-upload` | Upload a Google Sheet of leads into an Instantly campaign — column→field/merge-var mapping, drops bad/dupe emails, fills blank tags, test-first then bulk (idempotent), never launches |
+| `avenfield-spamguard` | Always-on deliverability/spam scan for copy — banned words/phrases, promotional/phishing wording, formatting bans; suggests rewrites, scans live Instantly sequences, rewrites risky company names |
+| `avenfield-spintax` | Spintax cold-email copy for Instantly ({{RANDOM|a|b}}) per 8 strict rules, with a deterministic audit — combination count, banned-word scan, article/format checks, sample combinations |
+| `avenfield-gmaps-scraper` | Scrape Google Maps business leads via a RapidAPI scraper (default: letscrape Local Business Data) — queries → normalized rows (name/address/phone/website/email/rating/place_id), test-first, quota estimate, idempotent append into a Google Sheet tab (deduped on place_id) |
 
 Your existing copy/spintax/spamguard skills stay as-is — these complete the set.
 
@@ -61,9 +69,14 @@ existing skills.
 
 ## Security notes
 
+- A **pre-commit hook** (`.githooks/pre-commit`, enabled by `install.sh`) blocks
+  any commit that contains a secret-shaped value or a sensitive filename, as a
+  backstop to `.gitignore`. Override a false positive with `ALLOW_SECRET=1 git
+  commit …` or `git commit --no-verify`.
 - This puts your provider keys on every device that installs the skills. That's
   the trade-off for full local flexibility and no server dependency. Keep the
   devices trusted; rotate keys if a device is lost.
 - If you'd rather keep keys in ONE place and hand out revocable per-person
   tokens instead, the skills can be pointed at a hosted proxy — ask and we'll
   switch the transport without changing how the skills feel.
+

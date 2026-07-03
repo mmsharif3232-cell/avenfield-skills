@@ -23,6 +23,13 @@ for dir in "$REPO_SKILLS"/avenfield-*/; do
   echo "  ✓ $name"
 done
 
+# ── 1b. Enable the secret-blocking git hook (defense-in-depth) ───────
+if [ -d "$REPO_SKILLS/.githooks" ]; then
+  ( cd "$REPO_SKILLS" && git config core.hooksPath .githooks ) 2>/dev/null \
+    && echo "  ✓ pre-commit secret guard enabled (.githooks)" \
+    || echo "  ! could not set core.hooksPath (not a git repo?)"
+fi
+
 creds_ready() { [ -f "$CRED" ] && grep -q 'CLOUDFLARE_API_TOKEN=..*' "$CRED" 2>/dev/null; }
 
 setup() {

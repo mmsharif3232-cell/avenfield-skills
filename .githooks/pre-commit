@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Avenfield pre-commit guard — block secrets from ever being committed.
+# Scans staged files for secret-like VALUES and sensitive FILENAMES, prints the
+# offending file (never the secret), and aborts the commit.
+# Override a false positive with:  ALLOW_SECRET=1 git commit ...   (or git commit --no-verify)
+set -euo pipefail
+[ "${ALLOW_SECRET:-}" = "1" ] && exit 0
+
+# secret value signatures
+pat='sk-proj-[A-Za-z0-9_-]{10,}|sk-[A-Za-z0-9]{20,}|cfut_[A-Za-z0-9]{8,}|-----BEGIN[ A-Z]*PRIVATE KEY-----|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9A-Za-z-]{10,}'
+# sensitive filenames (defense-in-depth alongside .gitignore)
+namepat='(^|/)(credentials\.env|.*-sa\.json|.*_sa\.json|.*sa\.json|.*\.pem|.*\.key|.*service-account.*\.json)$'
+
+violations=""
+while IFS= read -r f; do
+  [ -z "$f" ] && continue
+  case "$f" in .githooks/*) continue;; esac          # don't scan this hook (holds the patterns)
+  if printf '%s' "$f" | grep -qiE "$namepat"; then
+    violations+="  [filename] $f"$'\n'; continue
+  fi
+  if git show ":$f" 2>/dev/null | grep -qE "$pat"; then
+    violations+="  [content]  $f"$'\n'
+  fi
+done < <(git diff --cached --name-only --diff-filter=AM)
+
+if [ -n "$violations" ]; then
+  echo "✋ avenfield pre-commit: possible secret(s) detected — commit blocked:"
+  printf '%s' "$violations"
+  echo "Secrets belong only in ~/.avenfield/, never in the repo."
+  echo "False positive? override with:  ALLOW_SECRET=1 git commit ...   (or --no-verify)"
+  exit 1
+fi
+exit 0

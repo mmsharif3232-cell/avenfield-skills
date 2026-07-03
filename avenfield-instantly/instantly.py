@@ -110,6 +110,46 @@ def cmd_push_sequence(args):
     print(json.dumps({"status": status, "result": data}, ensure_ascii=False, indent=2))
 
 
+def _add_one(campaign, lead, allow_dupes, retries=3):
+    import time
+    body = dict(lead)
+    body.update({"campaign": campaign, "skip_if_in_campaign": not allow_dupes})
+    for attempt in range(retries + 1):
+        status, data = call("POST", "/leads", body=body)
+        if status in (200, 201):
+            return True, status, data
+        if status in (429, 500, 502, 503, 504) and attempt < retries:
+            time.sleep(1.5 * (attempt + 1))
+            continue
+        return False, status, data
+    return False, status, data
+
+
+def cmd_push_leads(args):
+    """Bulk-add a JSONL of leads to a campaign, in parallel, idempotently."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    src = open(args.file) if args.file else sys.stdin
+    leads = [json.loads(ln) for ln in src if ln.strip()]
+    total = len(leads)
+    ok = fail = 0
+    errors = []
+    with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as ex:
+        futs = [ex.submit(_add_one, args.campaign, ld, args.allow_dupes) for ld in leads]
+        for i, f in enumerate(as_completed(futs), 1):
+            good, status, data = f.result()
+            if good:
+                ok += 1
+            else:
+                fail += 1
+                if len(errors) < 10:
+                    errors.append({"status": status, "error": str(data)[:160]})
+            if i % 250 == 0 or i == total:
+                print(f"  {i}/{total} pushed · ok={ok} fail={fail}", file=sys.stderr)
+    print(json.dumps({"campaign": args.campaign, "total": total,
+                      "ok": ok, "failed": fail, "errors": errors},
+                     ensure_ascii=False, indent=2))
+
+
 def cmd_request(args):
     body = json.loads(args.body) if args.body else None
     status, data = call(args.method, args.path, body=body, query=args.query)
@@ -138,6 +178,13 @@ def main():
                    help='JSON array of steps, e.g. [{"type":"email","delay":0,'
                         '"variants":[{"subject":"..","body":"<div>..</div>"}]}]')
     p.set_defaults(fn=cmd_push_sequence)
+
+    p = sub.add_parser("push-leads", help="Bulk-add a JSONL of leads to a campaign (parallel, idempotent).")
+    p.add_argument("--campaign", required=True)
+    p.add_argument("--file", help="JSONL file of leads (default: stdin). Each line a lead object with 'email'.")
+    p.add_argument("--concurrency", type=int, default=5)
+    p.add_argument("--allow-dupes", action="store_true", help="Don't skip leads already in the campaign.")
+    p.set_defaults(fn=cmd_push_leads)
 
     p = sub.add_parser("request", help="Raw passthrough to any endpoint.")
     p.add_argument("method")
