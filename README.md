@@ -21,6 +21,7 @@ pipeline. You ask in plain English; Claude runs the skill.
 | `avenfield-instantly-upload` | Upload a Google Sheet of leads into an Instantly campaign — column→field/merge-var mapping, drops bad/dupe emails, fills blank tags, test-first then bulk (idempotent), never launches |
 | `avenfield-spamguard` | Always-on deliverability/spam scan for copy — banned words/phrases, promotional/phishing wording, formatting bans; suggests rewrites, scans live Instantly sequences, rewrites risky company names |
 | `avenfield-spintax` | Spintax cold-email copy for Instantly ({{RANDOM|a|b}}) per 8 strict rules, with a deterministic audit — combination count, banned-word scan, article/format checks, sample combinations |
+| `avenfield-gmaps-scraper` | Scrape Google Maps business leads via a RapidAPI scraper (default: letscrape Local Business Data) — queries → normalized rows (name/address/phone/website/email/rating/place_id), test-first, quota estimate, idempotent append into a Google Sheet tab (deduped on place_id) |
 
 Your existing copy/spintax/spamguard skills stay as-is — these complete the set.
 

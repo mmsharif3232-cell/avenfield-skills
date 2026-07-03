@@ -59,6 +59,7 @@ already has access). Keep it current — it's the single index of what we're run
 - `avenfield-browser-render` — render / scrape / screenshot / extract any site (single, batch, or dedupe-column → sidecar tab → map back).
 - `avenfield-verify` — verify email deliverability (valid / catch-all / invalid / disposable / role).
 - `avenfield-clean-emails` — deterministically clean a scraped email column (URL-decode `%20`, strip zero-width/underscore/dash prefixes, unglue markdown/phone, repair doubled TLDs, block placeholder/supplier/gateway domains) + per-row status. Run BEFORE `avenfield-verify`.
+- `avenfield-gmaps-scraper` — scrape Google Maps business leads via a RapidAPI scraper (queries → normalized rows → idempotent sheet append, deduped on place_id); clean + verify emails downstream before use.
 - `avenfield-find-websites` — find an org's real official website from name+location (OpenAI web search → drop directories → Cloudflare render-verify name/city on page or host-acronym) then write `confirmed_url` + status note; estimate/test/run, idempotent, only writes verified URLs.
 - `avenfield-instantly` — drive Instantly v2 (campaigns, leads incl. bulk push-leads, sequences, generic passthrough).
 - `avenfield-instantly-upload` — upload a sheet of leads into a campaign (column→field/var mapping, test-first, idempotent, never launches).
